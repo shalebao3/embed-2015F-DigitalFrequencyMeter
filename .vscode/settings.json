@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "/Users/ganlu/developer/github/embed/embed-2015F-DigitalFrequencyMeter/firmware"
+    "cmake.sourceDirectory": "${workspaceFolder}/firmware",
+    "cmake.cmakePath": "/opt/homebrew/bin/cmake"
 }
