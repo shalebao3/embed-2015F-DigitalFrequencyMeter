@@ -42,12 +42,19 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-volatile uint32_t capture1 = 0;
-volatile uint32_t capture2 = 0;
-volatile uint32_t period_ticks = 0;
-volatile uint32_t frequency_hz = 0;
-volatile uint8_t capture_state = 0;
+
 /* USER CODE BEGIN PV */
+
+/* USER CODE BEGIN PV */
+
+static volatile uint32_t capture1 = 0;
+static volatile uint32_t capture2 = 0;
+static volatile uint32_t period_ticks = 0;
+static volatile uint32_t frequency_hz = 0;
+static volatile uint8_t capture_state = 0;
+static volatile uint32_t tim2_overflow_count = 0;
+
+/* USER CODE END PV */
 
 /* USER CODE END PV */
 
@@ -95,7 +102,7 @@ int main(void)
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
-  if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
+  if (HAL_TIM_Base_Start_IT(&htim2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -104,6 +111,12 @@ int main(void)
   {
     Error_Handler();
   }
+
+  if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -191,6 +204,14 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 
       capture1 = capture2;
     }
+  }
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM2)
+  {
+    tim2_overflow_count++;
   }
 }
 
