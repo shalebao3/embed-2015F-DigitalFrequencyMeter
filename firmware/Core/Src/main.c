@@ -52,6 +52,7 @@ static volatile uint32_t frequency_hz = 0;
 static volatile uint8_t capture_state = 0;
 static volatile uint32_t tim2_overflow_count = 0;
 static volatile uint32_t gate_frequency_hz = 0;
+static volatile uint32_t tim4_overflow_count = 0;
 
 /* USER CODE END PV */
 
@@ -106,7 +107,7 @@ int main(void)
     Error_Handler();
   }
 
-  if (HAL_TIM_Base_Start(&htim4) != HAL_OK)
+  if (HAL_TIM_Base_Start_IT(&htim4) != HAL_OK)
   {
     Error_Handler();
   }
@@ -136,8 +137,13 @@ int main(void)
     /* USER CODE BEGIN 3 */
     HAL_Delay(1000);
 
-    gate_frequency_hz = __HAL_TIM_GET_COUNTER(&htim4);
+    uint32_t tim4_counter =
+        __HAL_TIM_GET_COUNTER(&htim4);
 
+    gate_frequency_hz =
+        tim4_overflow_count * 65536UL + tim4_counter;
+
+    tim4_overflow_count = 0;
     __HAL_TIM_SET_COUNTER(&htim4, 0);
   }
   /* USER CODE END 3 */
@@ -235,6 +241,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   if (htim->Instance == TIM2)
   {
     tim2_overflow_count++;
+  }
+  else if (htim->Instance == TIM4)
+  {
+    tim4_overflow_count++;
   }
 }
 
