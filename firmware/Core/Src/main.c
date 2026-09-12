@@ -105,6 +105,11 @@ int main(void)
     Error_Handler();
   }
 
+  if (HAL_TIM_Base_Start(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  
   // PA0 输入边沿
   if (HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1) != HAL_OK)
   {
