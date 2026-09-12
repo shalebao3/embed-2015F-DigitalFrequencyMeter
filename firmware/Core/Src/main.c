@@ -51,6 +51,7 @@ static volatile uint64_t timestamp2 = 0;
 static volatile uint32_t frequency_hz = 0;
 static volatile uint8_t capture_state = 0;
 static volatile uint32_t tim2_overflow_count = 0;
+static volatile uint32_t gate_frequency_hz = 0;
 
 /* USER CODE END PV */
 
@@ -110,6 +111,8 @@ int main(void)
     Error_Handler();
   }
   
+  __HAL_TIM_SET_COUNTER(&htim4, 0);
+
   // PA0 输入边沿
   if (HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1) != HAL_OK)
   {
@@ -128,7 +131,11 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
+    HAL_Delay(1000);
 
+    gate_frequency_hz = __HAL_TIM_GET_COUNTER(&htim4);
+
+    __HAL_TIM_SET_COUNTER(&htim4, 0);
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
