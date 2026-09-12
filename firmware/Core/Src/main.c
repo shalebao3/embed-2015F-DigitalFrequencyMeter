@@ -178,6 +178,20 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
     uint32_t capture =
         HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 
+    /* 拍一张当前溢出次数的快照 */
+    uint32_t overflow_snapshot = tim2_overflow_count;
+
+    /*
+     * 如果 CNT 已经发生溢出，但 Update Callback
+     * 还没来得及把 tim2_overflow_count +1，
+     * 并且本次捕获值很小，说明捕获发生在溢出之后。
+     */
+    if ((__HAL_TIM_GET_FLAG(htim, TIM_FLAG_UPDATE) != RESET) &&
+        (capture < 32768U))
+    {
+      overflow_snapshot++;
+    }
+
     uint64_t current_timestamp =
         (uint64_t)tim2_overflow_count * 65536ULL + capture;
 
