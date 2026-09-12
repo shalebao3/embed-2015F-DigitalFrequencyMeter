@@ -47,7 +47,9 @@
 
 static volatile uint32_t capture1 = 0;
 static volatile uint32_t capture2 = 0;
-static volatile uint32_t period_ticks = 0;
+static volatile uint64_t period_ticks = 0;
+static volatile uint64_t timestamp1 = 0;
+static volatile uint64_t timestamp2 = 0;
 static volatile uint32_t frequency_hz = 0;
 static volatile uint8_t capture_state = 0;
 static volatile uint32_t tim2_overflow_count = 0;
@@ -175,8 +177,8 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
   if (htim->Instance == TIM2 &&
       htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
   {
-    uint32_t capture =
-        HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+    uint64_t current_timestamp =
+        (uint64_t)tim2_overflow_count * 65536ULL + capture;
 
     if (capture_state == 0)
     {
