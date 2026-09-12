@@ -126,6 +126,8 @@ int main(void)
   }
 
   /* PWM 已经开始，再开启第一次测量窗口 */
+  tim4_overflow_count = 0;
+  __HAL_TIM_SET_COUNTER(&htim4, 0);
   __HAL_TIM_SET_COUNTER(&htim1, 0);
 
   if (HAL_TIM_Base_Start_IT(&htim1) != HAL_OK)
@@ -164,10 +166,6 @@ int main(void)
       __HAL_TIM_SET_COUNTER(&htim4, 0);
       __HAL_TIM_SET_COUNTER(&htim1, 0);
 
-      if (HAL_TIM_Base_Start_IT(&htim1) != HAL_OK)
-      {
-        Error_Handler();
-      }
       __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
       HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
 
@@ -175,11 +173,10 @@ int main(void)
 
       HAL_NVIC_EnableIRQ(TIM4_IRQn);
 
+      /* TIM1 的 Update 中断已在第一次 Start_IT 时开启，后续只恢复硬件计数 */
       __HAL_TIM_ENABLE(&htim4);
       __HAL_TIM_ENABLE(&htim1);
     }
-
-    
   }
   /* USER CODE END 3 */
 }
@@ -312,7 +309,7 @@ void Error_Handler(void)
   * @brief  Reports the name of the source file and the source line number
   *         where the assert_param error has occurred.
   * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
+  * @param  line: source line number
   * @retval None
   */
 void assert_failed(uint8_t *file, uint32_t line)
