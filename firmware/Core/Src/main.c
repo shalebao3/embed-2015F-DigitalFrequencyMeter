@@ -53,6 +53,7 @@ static volatile uint8_t capture_state = 0;
 static volatile uint32_t tim2_overflow_count = 0;
 static volatile uint32_t gate_frequency_hz = 0;
 static volatile uint32_t tim4_overflow_count = 0;
+static volatile uint8_t gate_ready = 0;
 
 /* USER CODE END PV */
 
@@ -125,7 +126,12 @@ int main(void)
   }
 
   /* PWM 已经开始，再开启第一次测量窗口 */
-  __HAL_TIM_SET_COUNTER(&htim4, 0);
+  __HAL_TIM_SET_COUNTER(&htim1, 0);
+
+  if (HAL_TIM_Base_Start_IT(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE END 2 */
 
@@ -136,7 +142,38 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_Delay(1000);
+    if (gate_ready)
+    {
+      HAL_NVIC_DisableIRQ(TIM4_IRQn);
+
+      uint32_t overflow_snapshot = tim4_overflow_count;
+      uint32_t counter_snapshot =
+          __HAL_TIM_GET_COUNTER(&htim4);
+
+      if (__HAL_TIM_GET_FLAG(&htim4, TIM_FLAG_UPDATE) != RESET)
+      {
+        overflow_snapshot++;
+      }
+
+      gate_frequency_hz =
+          overflow_snapshot * 65536UL + counter_snapshot;
+
+      /* 清理下一轮 */
+      tim4_overflow_count = 0;
+
+      __HAL_TIM_SET_COUNTER(&htim4, 0);
+      __HAL_TIM_SET_COUNTER(&htim1, 0);
+
+      __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
+      HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
+
+      gate_ready = 0;
+
+      HAL_NVIC_EnableIRQ(TIM4_IRQn);
+
+      __HAL_TIM_ENABLE(&htim4);
+      __HAL_TIM_ENABLE(&htim1);
+    }
 
     /* 暂停 TIM4，保证下面读取的是同一时刻的状态 */
     HAL_NVIC_DisableIRQ(TIM4_IRQn);
@@ -261,7 +298,15 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if (htim->Instance == TIM2)
+  if (htim->Instance == TIM1)
+  {
+    /* 1 秒测量窗口结束 */
+    __HAL_TIM_DISABLE(&htim1);
+    __HAL_TIM_DISABLE(&htim4);
+
+    gate_ready = 1;
+  }
+  else if (htim->Instance == TIM2)
   {
     tim2_overflow_count++;
   }
