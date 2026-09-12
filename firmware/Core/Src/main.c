@@ -42,7 +42,11 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-
+volatile uint32_t capture1 = 0;
+volatile uint32_t capture2 = 0;
+volatile uint32_t period_ticks = 0;
+volatile uint32_t frequency_hz = 0;
+volatile uint8_t capture_state = 0;
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -95,7 +99,11 @@ int main(void)
   {
     Error_Handler();
   }
-  
+
+  if (HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -149,6 +157,42 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM2 &&
+      htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
+  {
+    uint32_t capture =
+        HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+
+    if (capture_state == 0)
+    {
+      capture1 = capture;
+      capture_state = 1;
+    }
+    else
+    {
+      capture2 = capture;
+
+      if (capture2 >= capture1)
+      {
+        period_ticks = capture2 - capture1;
+      }
+      else
+      {
+        period_ticks = (65536 - capture1) + capture2;
+      }
+
+      if (period_ticks != 0)
+      {
+        frequency_hz = 1000000 / period_ticks;
+      }
+
+      capture1 = capture2;
+    }
+  }
+}
 
 /* USER CODE END 4 */
 
