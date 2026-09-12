@@ -193,7 +193,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
     }
 
     uint64_t current_timestamp =
-        (uint64_t)tim2_overflow_count * 65536ULL + capture;
+        (uint64_t)overflow_snapshot * 65536ULL + capture;
 
     if (capture_state == 0)
     {
