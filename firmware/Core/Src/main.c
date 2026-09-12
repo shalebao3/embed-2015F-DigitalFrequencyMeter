@@ -45,8 +45,6 @@
 
 /* USER CODE BEGIN PV */
 
-/* USER CODE BEGIN PV */
-
 static volatile uint32_t capture1 = 0;
 static volatile uint32_t capture2 = 0;
 static volatile uint32_t period_ticks = 0;
@@ -56,7 +54,6 @@ static volatile uint32_t tim2_overflow_count = 0;
 
 /* USER CODE END PV */
 
-/* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
@@ -102,11 +99,13 @@ int main(void)
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
+  // 溢出计数
   if (HAL_TIM_Base_Start_IT(&htim2) != HAL_OK)
   {
     Error_Handler();
   }
 
+  // PA0 输入边沿
   if (HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
