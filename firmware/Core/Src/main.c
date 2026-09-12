@@ -164,6 +164,10 @@ int main(void)
       __HAL_TIM_SET_COUNTER(&htim4, 0);
       __HAL_TIM_SET_COUNTER(&htim1, 0);
 
+      if (HAL_TIM_Base_Start_IT(&htim1) != HAL_OK)
+      {
+        Error_Handler();
+      }
       __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
       HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
 
@@ -175,36 +179,7 @@ int main(void)
       __HAL_TIM_ENABLE(&htim1);
     }
 
-    /* 暂停 TIM4，保证下面读取的是同一时刻的状态 */
-    HAL_NVIC_DisableIRQ(TIM4_IRQn);
-    __HAL_TIM_DISABLE(&htim4);
-
-    uint32_t overflow_snapshot = tim4_overflow_count;
-    uint32_t counter_snapshot =
-        __HAL_TIM_GET_COUNTER(&htim4);
-
-    /*
-     * 如果已经发生溢出，但 TIM4_IRQHandler
-     * 还没来得及执行，那么 UIF 仍然是 1。
-     * 这一次溢出需要手工补进快照。
-     */
-    if (__HAL_TIM_GET_FLAG(&htim4, TIM_FLAG_UPDATE) != RESET)
-    {
-      overflow_snapshot++;
-    }
-
-    gate_frequency_hz =
-        overflow_snapshot * 65536UL + counter_snapshot;
-
-    /* 开始下一轮测量 */
-    tim4_overflow_count = 0;
-    __HAL_TIM_SET_COUNTER(&htim4, 0);
-
-    __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
-    HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
-
-    __HAL_TIM_ENABLE(&htim4);
-    HAL_NVIC_EnableIRQ(TIM4_IRQn);
+    
   }
   /* USER CODE END 3 */
 }
