@@ -58,7 +58,6 @@ static volatile uint64_t period_ns = 0;    // 输入信号周期，单位 ns
 static volatile uint64_t timestamp1 = 0; // 上一次 CH1 捕获的扩展时间戳
 static volatile uint64_t timestamp2 = 0; // 当前 CH1 捕获的扩展时间戳
 
-static volatile uint32_t frequency_hz = 0; // 周期法计算得到的频率，单位 Hz
 
 static volatile uint8_t capture_state = 0;        // 0=等待第一次捕获，1=已有上一时间戳
 static volatile uint32_t tim2_overflow_count = 0; // TIM2 16 位 CNT 软件溢出计数
@@ -68,8 +67,8 @@ static volatile uint64_t interval_end_timestamp = 0;   // CH2：B 信号到达�
 static volatile uint64_t interval_ticks = 0;           // A → B 的 TIM2 tick 数
 static volatile uint64_t interval_ns = 0;              // A → B 时间间隔，单位 ns
 static volatile uint8_t interval_waiting_ch2 = 0;      // 1=已经收到 A，等待 B
-static volatile uint32_t frequency_hz = 0;
-static volatile uint64_t frequency_millihz = 0;
+static volatile uint32_t frequency_hz = 0;             // 周期法计算得到的频率，单位 Hz
+static volatile uint64_t frequency_millihz = 0;        // mHz
 
 // TIM4
 static volatile uint32_t gate_frequency_hz = 0;      // TIM4 在 1 秒闸门内统计得到的频率，单位 Hz，等于“溢出次数 * 65536 + CNT”
