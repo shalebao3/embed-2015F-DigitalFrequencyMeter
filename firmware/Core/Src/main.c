@@ -374,32 +374,35 @@ void SystemClock_Config(void)
  */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
-  if (htim->Instance == TIM2 &&
-      htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
+  /* 这个回调目前只处理 TIM2 */
+  if (htim->Instance != TIM2)
   {
-    uint32_t capture =                                  // 本次 PA0 上升沿到来时，TIM2 硬件锁存到 CCR1 的 CNT 值
-        /*
-         * HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1)
-         * 作用：读取输入捕获寄存器 CCR1 中保存的捕获值。
-         * 参数：
-         *   htim          -> 当前触发回调的定时器句柄，这里实际是 TIM2。
-         *   TIM_CHANNEL_1 -> 读取通道 1 对应的 CCR1。
-         * 返回值：本次输入边沿到来时硬件锁存的 CNT 值。
-         */
+    return;
+  }
+
+  /* ==================== TIM2_CH1 / PA0 ==================== */
+  if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
+  {
+    /*
+     * CH1 输入捕获：
+     * PA0 上升沿到来时，硬件已经自动完成：
+     *
+     * TIM2_CNT -> CCR1
+     */
+    uint32_t capture =
         HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 
-    /* 拍一张当前溢出次数的快照 */
-    uint32_t overflow_snapshot = tim2_overflow_count;  // 拍下本次捕获对应的 TIM2 软件溢出次数
+    /* 拍下当前 TIM2 软件溢出次数 */
+    uint32_t overflow_snapshot = tim2_overflow_count;
 
     /*
-     * 如果 CNT 已经发生溢出，但 Update Callback
-     * 还没来得及把 tim2_overflow_count +1，
-     * 并且本次捕获值很小，说明捕获发生在溢出之后。
+     * 处理捕获与溢出几乎同时发生的边界情况。
      *
-     * __HAL_TIM_GET_FLAG(htim, TIM_FLAG_UPDATE)
-     * 参数：
-     *   htim             -> 当前定时器句柄（TIM2）。
-     *   TIM_FLAG_UPDATE  -> 检查 Update Flag / UIF。
+     * UIF = 1：
+     *   TIM2 已经溢出；
+     *
+     * capture 很小：
+     *   说明本次捕获大概率发生在溢出之后。
      */
     if ((__HAL_TIM_GET_FLAG(htim, TIM_FLAG_UPDATE) != RESET) &&
         (capture < 32768U))
@@ -407,9 +410,17 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
       overflow_snapshot++;
     }
 
-    uint64_t current_timestamp =                        // 将“溢出次数 + 本次 CCR1”组合成 64 位扩展时间戳
+    /*
+     * 把：
+     *
+     * 溢出次数 + CCR1
+     *
+     * 拼成同一条连续的 64 位时间轴。
+     */
+    uint64_t current_timestamp =
         (uint64_t)overflow_snapshot * 65536ULL + capture;
 
+    /* ---------- 原来的 CH1 周期法测频 ---------- */
     if (capture_state == 0)
     {
       timestamp1 = current_timestamp;
@@ -426,7 +437,70 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
         frequency_hz = 1000000ULL / period_ticks;
       }
 
+      /* 当前边沿成为下一次测量的“上一次边沿” */
       timestamp1 = timestamp2;
+    }
+
+    /* ---------- A -> B 时间间隔测量起点 ---------- */
+    if (interval_waiting_ch2 == 0)
+    {
+      /*
+       * CH1 这次上升沿作为 A 信号。
+       * 保存 A 到达时刻，然后等待 CH2 的 B 信号。
+       */
+      interval_start_timestamp = current_timestamp;
+      interval_waiting_ch2 = 1;
+    }
+  }
+
+  /* ==================== TIM2_CH2 / PA1 ==================== */
+  else if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_2)
+  {
+    /*
+     * CH2 输入捕获：
+     * PA1 上升沿到来时，硬件已经自动完成：
+     *
+     * TIM2_CNT -> CCR2
+     */
+    uint32_t capture =
+        HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2);
+
+    uint32_t overflow_snapshot = tim2_overflow_count;
+
+    /* 和 CH1 一样处理溢出边界 */
+    if ((__HAL_TIM_GET_FLAG(htim, TIM_FLAG_UPDATE) != RESET) &&
+        (capture < 32768U))
+    {
+      overflow_snapshot++;
+    }
+
+    uint64_t current_timestamp =
+        (uint64_t)overflow_snapshot * 65536ULL + capture;
+
+    /*
+     * 只有已经收到 CH1 的 A 信号，
+     * CH2 的 B 信号才有意义。
+     */
+    if (interval_waiting_ch2 == 1)
+    {
+      interval_end_timestamp = current_timestamp;
+
+      /*
+       * B - A = 两路信号的时间差。
+       *
+       * 当前 TIM2：
+       * 1 tick = 1 us
+       *
+       * 所以 interval_ticks 的数值也就是微秒数。
+       */
+      interval_ticks =
+          interval_end_timestamp - interval_start_timestamp;
+
+      /*
+       * 本次 A -> B 测量结束。
+       * 下一次重新等待新的 CH1。
+       */
+      interval_waiting_ch2 = 0;
     }
   }
 }
