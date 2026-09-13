@@ -34,6 +34,12 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* TIM2 当前直接使用 72 MHz 定时器时钟，PSC = 0 */
+#define TIM2_COUNTER_HZ 72000000ULL
+
+/* 1 秒 = 1,000,000,000 ns */
+#define NANOSECONDS_PER_SECOND 1000000000ULL
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -46,16 +52,23 @@
 /* USER CODE BEGIN PV */
 
 // TIM2
-static volatile uint64_t period_ticks = 0;          // TIM2 相邻两次输入捕获之间的周期计数值，当前 1 tick = 1 us
-static volatile uint64_t timestamp1 = 0;            // TIM2 上一次输入边沿的扩展时间戳
-static volatile uint64_t timestamp2 = 0;            // TIM2 当前输入边沿的扩展时间戳
-static volatile uint32_t frequency_hz = 0;           // TIM2 周期法计算得到的频率，单位 Hz
-static volatile uint8_t capture_state = 0;           // TIM2 输入捕获状态：0=等待第一次捕获，1=已经有上一时间戳
-static volatile uint32_t tim2_overflow_count = 0;    // TIM2 的 16 位 CNT 溢出次数，用于扩展时间戳范围
+// TIM2
+static volatile uint64_t period_ticks = 0; // 相邻两次 CH1 捕获之间的 TIM2 tick 数
+static volatile uint64_t period_ns = 0;    // 输入信号周期，单位 ns
+
+static volatile uint64_t timestamp1 = 0; // 上一次 CH1 捕获的扩展时间戳
+static volatile uint64_t timestamp2 = 0; // 当前 CH1 捕获的扩展时间戳
+
+static volatile uint32_t frequency_hz = 0; // 周期法计算得到的频率，单位 Hz
+
+static volatile uint8_t capture_state = 0;        // 0=等待第一次捕获，1=已有上一时间戳
+static volatile uint32_t tim2_overflow_count = 0; // TIM2 16 位 CNT 软件溢出计数
+
 static volatile uint64_t interval_start_timestamp = 0; // CH1：A 信号到达时间
 static volatile uint64_t interval_end_timestamp = 0;   // CH2：B 信号到达时间
-static volatile uint64_t interval_ticks = 0;           // A → B 时间差，当前 1 tick = 1 us
-static volatile uint8_t interval_waiting_ch2 = 0;      // 1=已经收到 A，正在等待 B
+static volatile uint64_t interval_ticks = 0;           // A → B 的 TIM2 tick 数
+static volatile uint64_t interval_ns = 0;              // A → B 时间间隔，单位 ns
+static volatile uint8_t interval_waiting_ch2 = 0;      // 1=已经收到 A，等待 B
 
 // TIM4
 static volatile uint32_t gate_frequency_hz = 0;      // TIM4 在 1 秒闸门内统计得到的频率，单位 Hz，等于“溢出次数 * 65536 + CNT”
@@ -434,9 +447,15 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 
       if (period_ticks != 0)
       {
-        frequency_hz = 1000000ULL / period_ticks;
-      }
+        frequency_hz =
+            (TIM2_COUNTER_HZ + period_ticks / 2ULL) /
+            period_ticks;
 
+        period_ns =
+            (period_ticks * NANOSECONDS_PER_SECOND +
+             TIM2_COUNTER_HZ / 2ULL) /
+            TIM2_COUNTER_HZ;
+      }
       /* 当前边沿成为下一次测量的“上一次边沿” */
       timestamp1 = timestamp2;
     }
@@ -486,13 +505,22 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
       interval_end_timestamp = current_timestamp;
 
       /*
-       * B - A = 两路信号的时间差。
+       * B - A = 两路信号之间经历的 TIM2 tick 数。
        *
-       * 当前 TIM2：
-       * 1 tick = 1 us
+       * TIM2 当前计数频率为 72 MHz：
        *
-       * 所以 interval_ticks 的数值也就是微秒数。
+       * 1 tick ≈ 13.8889 ns
+       *
+       * 因此 interval_ticks 是原始硬件计数值，
+       * interval_ns 才是换算后的实际时间。
        */
+      interval_ticks =
+          interval_end_timestamp - interval_start_timestamp;
+
+      interval_ns =
+          (interval_ticks * NANOSECONDS_PER_SECOND +
+           TIM2_COUNTER_HZ / 2ULL) /
+          TIM2_COUNTER_HZ;
       interval_ticks =
           interval_end_timestamp - interval_start_timestamp;
 
