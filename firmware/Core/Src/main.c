@@ -45,15 +45,15 @@
 
 /* USER CODE BEGIN PV */
 
-static volatile uint64_t period_ticks = 0;
-static volatile uint64_t timestamp1 = 0;
-static volatile uint64_t timestamp2 = 0;
-static volatile uint32_t frequency_hz = 0;
-static volatile uint8_t capture_state = 0;
-static volatile uint32_t tim2_overflow_count = 0;
-static volatile uint32_t gate_frequency_hz = 0;
-static volatile uint32_t tim4_overflow_count = 0;
-static volatile uint8_t gate_ready = 0;
+static volatile uint64_t period_ticks = 0;          // TIM2 相邻两次输入捕获之间的周期计数值，当前 1 tick = 1 us
+static volatile uint64_t timestamp1 = 0;            // TIM2 上一次输入边沿的扩展时间戳
+static volatile uint64_t timestamp2 = 0;            // TIM2 当前输入边沿的扩展时间戳
+static volatile uint32_t frequency_hz = 0;           // TIM2 周期法计算得到的频率，单位 Hz
+static volatile uint8_t capture_state = 0;           // TIM2 输入捕获状态：0=等待第一次捕获，1=已经有上一时间戳
+static volatile uint32_t tim2_overflow_count = 0;    // TIM2 的 16 位 CNT 溢出次数，用于扩展时间戳范围
+static volatile uint32_t gate_frequency_hz = 0;      // TIM4 在 1 秒闸门内统计得到的频率，单位 Hz
+static volatile uint32_t tim4_overflow_count = 0;    // TIM4 的 16 位 CNT 溢出次数，用于扩展外部脉冲计数范围
+static volatile uint8_t gate_ready = 0;              // TIM1 的 1 秒闸门完成标志：1=本轮测量结果可以读取
 
 /* USER CODE END PV */
 
@@ -148,8 +148,8 @@ int main(void)
     {
       HAL_NVIC_DisableIRQ(TIM4_IRQn);
 
-      uint32_t overflow_snapshot = tim4_overflow_count;
-      uint32_t counter_snapshot =
+      uint32_t overflow_snapshot = tim4_overflow_count;       // 拍下 TIM4 当前已经记录的软件溢出次数
+      uint32_t counter_snapshot =                             // 拍下 1 秒闸门结束时 TIM4 当前 CNT 的剩余脉冲数
           __HAL_TIM_GET_COUNTER(&htim4);
 
       if (__HAL_TIM_GET_FLAG(&htim4, TIM_FLAG_UPDATE) != RESET)
@@ -227,11 +227,11 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
   if (htim->Instance == TIM2 &&
       htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
   {
-    uint32_t capture =
+    uint32_t capture =                                  // 本次 PA0 上升沿到来时，TIM2 硬件锁存到 CCR1 的 CNT 值
         HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 
     /* 拍一张当前溢出次数的快照 */
-    uint32_t overflow_snapshot = tim2_overflow_count;
+    uint32_t overflow_snapshot = tim2_overflow_count;  // 拍下本次捕获对应的 TIM2 软件溢出次数
 
     /*
      * 如果 CNT 已经发生溢出，但 Update Callback
@@ -244,7 +244,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
       overflow_snapshot++;
     }
 
-    uint64_t current_timestamp =
+    uint64_t current_timestamp =                        // 将“溢出次数 + 本次 CCR1”组合成 64 位扩展时间戳
         (uint64_t)overflow_snapshot * 65536ULL + capture;
 
     if (capture_state == 0)
@@ -316,7 +316,7 @@ void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+     ex: printf("Wrong parameters value: file %s, line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
