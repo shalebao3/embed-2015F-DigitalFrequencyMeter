@@ -157,6 +157,17 @@ int main(void)
   }
 
   /*
+   * 启动 TIM2_CH2 输入捕获中断
+   * PA1 上升沿到来时：
+   *   TIM2 当前 CNT -> CCR2
+   *   然后进入 HAL_TIM_IC_CaptureCallback()
+   */
+  if (HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /*
    * HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1)
    * 作用：启动 TIM3 通道 1 的 PWM 输出。
    * 参数：
