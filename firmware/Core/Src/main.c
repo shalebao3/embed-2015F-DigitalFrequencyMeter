@@ -68,6 +68,8 @@ static volatile uint64_t interval_end_timestamp = 0;   // CH2：B 信号到达�
 static volatile uint64_t interval_ticks = 0;           // A → B 的 TIM2 tick 数
 static volatile uint64_t interval_ns = 0;              // A → B 时间间隔，单位 ns
 static volatile uint8_t interval_waiting_ch2 = 0;      // 1=已经收到 A，等待 B
+static volatile uint32_t frequency_hz = 0;
+static volatile uint64_t frequency_millihz = 0;
 
 // TIM4
 static volatile uint32_t gate_frequency_hz = 0;      // TIM4 在 1 秒闸门内统计得到的频率，单位 Hz，等于“溢出次数 * 65536 + CNT”
@@ -75,6 +77,7 @@ static volatile uint32_t tim4_overflow_count = 0;    // TIM4 的 16 位 CNT 溢�
 
 // TIM1
 static volatile uint8_t gate_ready = 0;              // TIM1 的 1 秒闸门完成标志：1=本轮测量结果可以读取
+
 
 /* USER CODE END PV */
 
@@ -232,8 +235,6 @@ int main(void)
   {
     Error_Handler();
   }
-
-  uint64_t frequency_millihz;
 
   /* USER CODE END 2 */
 
@@ -450,6 +451,12 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
       {
         frequency_hz =
             (TIM2_COUNTER_HZ + period_ticks / 2ULL) /
+            period_ticks;
+
+        
+        frequency_millihz =
+            (TIM2_COUNTER_HZ * 1000ULL +
+             period_ticks / 2ULL) /
             period_ticks;
 
         period_ns =
