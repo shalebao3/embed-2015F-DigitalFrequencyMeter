@@ -52,9 +52,15 @@ static volatile uint64_t timestamp2 = 0;            // TIM2 当前输入边沿�
 static volatile uint32_t frequency_hz = 0;           // TIM2 周期法计算得到的频率，单位 Hz
 static volatile uint8_t capture_state = 0;           // TIM2 输入捕获状态：0=等待第一次捕获，1=已经有上一时间戳
 static volatile uint32_t tim2_overflow_count = 0;    // TIM2 的 16 位 CNT 溢出次数，用于扩展时间戳范围
+static volatile uint64_t interval_start_timestamp = 0; // CH1：A 信号到达时间
+static volatile uint64_t interval_end_timestamp = 0;   // CH2：B 信号到达时间
+static volatile uint64_t interval_ticks = 0;           // A → B 时间差，当前 1 tick = 1 us
+static volatile uint8_t interval_waiting_ch2 = 0;      // 1=已经收到 A，正在等待 B
+
 // TIM4
 static volatile uint32_t gate_frequency_hz = 0;      // TIM4 在 1 秒闸门内统计得到的频率，单位 Hz，等于“溢出次数 * 65536 + CNT”
 static volatile uint32_t tim4_overflow_count = 0;    // TIM4 的 16 位 CNT 溢出次数，用于扩展外部脉冲计数范围
+
 // TIM1
 static volatile uint8_t gate_ready = 0;              // TIM1 的 1 秒闸门完成标志：1=本轮测量结果可以读取
 
