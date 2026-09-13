@@ -45,14 +45,17 @@
 
 /* USER CODE BEGIN PV */
 
+// TIM2
 static volatile uint64_t period_ticks = 0;          // TIM2 相邻两次输入捕获之间的周期计数值，当前 1 tick = 1 us
 static volatile uint64_t timestamp1 = 0;            // TIM2 上一次输入边沿的扩展时间戳
 static volatile uint64_t timestamp2 = 0;            // TIM2 当前输入边沿的扩展时间戳
 static volatile uint32_t frequency_hz = 0;           // TIM2 周期法计算得到的频率，单位 Hz
 static volatile uint8_t capture_state = 0;           // TIM2 输入捕获状态：0=等待第一次捕获，1=已经有上一时间戳
 static volatile uint32_t tim2_overflow_count = 0;    // TIM2 的 16 位 CNT 溢出次数，用于扩展时间戳范围
+// TIM4
 static volatile uint32_t gate_frequency_hz = 0;      // TIM4 在 1 秒闸门内统计得到的频率，单位 Hz
 static volatile uint32_t tim4_overflow_count = 0;    // TIM4 的 16 位 CNT 溢出次数，用于扩展外部脉冲计数范围
+// TIM1
 static volatile uint8_t gate_ready = 0;              // TIM1 的 1 秒闸门完成标志：1=本轮测量结果可以读取
 
 /* USER CODE END PV */
@@ -103,7 +106,6 @@ int main(void)
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
 
-  // 溢出计数
   if (HAL_TIM_Base_Start_IT(&htim2) != HAL_OK)
   {
     Error_Handler();
@@ -114,7 +116,6 @@ int main(void)
     Error_Handler();
   }
 
-  // PA0 输入边沿
   if (HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
