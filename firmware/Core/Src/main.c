@@ -52,7 +52,6 @@
 /* USER CODE BEGIN PV */
 
 // TIM2
-// TIM2
 static volatile uint64_t period_ticks = 0; // 相邻两次 CH1 捕获之间的 TIM2 tick 数
 static volatile uint64_t period_ns = 0;    // 输入信号周期，单位 ns
 
@@ -233,6 +232,8 @@ int main(void)
   {
     Error_Handler();
   }
+
+  uint64_t frequency_millihz;
 
   /* USER CODE END 2 */
 
@@ -521,8 +522,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
           (interval_ticks * NANOSECONDS_PER_SECOND +
            TIM2_COUNTER_HZ / 2ULL) /
           TIM2_COUNTER_HZ;
-      interval_ticks =
-          interval_end_timestamp - interval_start_timestamp;
+
 
       /*
        * 本次 A -> B 测量结束。
