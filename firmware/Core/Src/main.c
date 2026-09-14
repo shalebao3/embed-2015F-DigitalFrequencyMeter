@@ -31,6 +31,13 @@
 
 typedef enum
 {
+  INSTRUMENT_MODE_FREQUENCY = 0,
+  INSTRUMENT_MODE_PERIOD,
+  INSTRUMENT_MODE_INTERVAL
+} InstrumentMode;
+
+typedef enum
+{
   FREQUENCY_METHOD_PERIOD = 0,
   FREQUENCY_METHOD_GATE
 } FrequencyMethod;
@@ -76,6 +83,10 @@ typedef enum
 
 /* USER CODE BEGIN PV */
 
+// 仪器功能模式
+static volatile InstrumentMode instrument_mode = INSTRUMENT_MODE_FREQUENCY;
+static volatile uint8_t instrument_mode_initialized = 0;
+
 // TIM2
 static volatile uint64_t period_ticks = 0; // 相邻两次 CH1 捕获之间的 TIM2 tick 数
 static volatile uint64_t period_ns = 0;    // 输入信号周期，单位 ns
@@ -91,30 +102,32 @@ static volatile uint64_t interval_end_timestamp = 0;   // CH2：B 信号到达�
 static volatile uint64_t interval_ticks = 0;           // A → B 的 TIM2 tick 数
 static volatile uint64_t interval_ns = 0;              // A → B 时间间隔，单位 ns
 static volatile uint8_t interval_waiting_ch2 = 0;      // 1=已经收到 A，等待 B
+
 static volatile uint32_t frequency_hz = 0;             // 周期法计算得到的频率，单位 Hz
 static volatile uint64_t frequency_millihz = 0;        // mHz
 static volatile uint32_t last_capture_tick_ms = 0;     // 最近一次 TIM2_CH1 上升沿对应的 HAL tick
 static volatile uint8_t frequency_valid = 0;           // 1=周期法当前频率结果仍然有效
 static volatile uint8_t period_requests_gate = 0;      // 1=周期已经短到应切换到闸门法
 
-// 自动测频策略
+// 自动频率测量策略；FREQUENCY/PERIOD 两种仪器模式共用
 static volatile FrequencyMethod frequency_method = FREQUENCY_METHOD_PERIOD;
 static volatile uint32_t measured_frequency_hz = 0;    // 自动选择后的最终频率结果
+static volatile uint64_t measured_period_ns = 0;       // 自动选择后的最终周期结果
 
 // TIM1：1 秒窗口内统计外部脉冲
-static volatile uint32_t gate_frequency_hz = 0;      // TIM1 在 1 秒闸门内统计得到的频率，单位 Hz，等于“溢出次数 * 65536 + CNT”
-static volatile uint32_t tim1_overflow_count = 0;    // TIM1 的 16 位 CNT 溢出次数，用于扩展外部脉冲计数范围
+static volatile uint32_t gate_frequency_hz = 0;      // TIM1 在 1 秒闸门内统计得到的频率，单位 Hz
+static volatile uint32_t tim1_overflow_count = 0;    // TIM1 的 16 位 CNT 溢出次数
 static volatile uint8_t gate_frequency_valid = 0;    // 1=至少已经完成过一次 1 秒闸门测量
 
 // TIM4：1 秒 One Pulse 硬件闸门
-static volatile uint8_t gate_ready = 0;               // TIM4 的 1 秒闸门完成标志：1=本轮测量结果可以读取
+static volatile uint8_t gate_ready = 0;              // 1=本轮闸门完成，主循环可以读取 TIM1
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
+static void Instrument_SetMode(InstrumentMode new_mode);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -128,6 +141,122 @@ void SystemClock_Config(void);
  * 3. 函数名带 _IT：Interrupt，表示该功能会配合中断使用。
  * 4. htim：Timer Handle（定时器句柄），HAL 通过它知道当前操作的是哪一个 TIM 外设。
  */
+
+/*
+ * Instrument_SetMode()
+ *
+ * 仪器功能层和底层测量方法分开：
+ *
+ * FREQUENCY / PERIOD：
+ *   共用自动测量引擎。
+ *   低频使用 TIM2_CH1 周期法，高频使用 TIM1 + TIM4 闸门法。
+ *   两种模式的区别主要是最终展示“频率”还是“周期”。
+ *
+ * INTERVAL：
+ *   停止闸门测频，只启用 TIM2_CH1 + TIM2_CH2，专门测 A -> B 时间间隔。
+ *
+ * 后续增加按键或屏幕菜单时，只需要在主循环上下文调用本函数切换模式。
+ */
+static void Instrument_SetMode(InstrumentMode new_mode)
+{
+  if (instrument_mode_initialized && (new_mode == instrument_mode))
+  {
+    return;
+  }
+
+  /* FREQUENCY <-> PERIOD 共用同一个测量引擎，不需要重新启动硬件。 */
+  if (instrument_mode_initialized &&
+      (instrument_mode != INSTRUMENT_MODE_INTERVAL) &&
+      (new_mode != INSTRUMENT_MODE_INTERVAL))
+  {
+    instrument_mode = new_mode;
+    return;
+  }
+
+  /* 配置捕获中断前先暂时屏蔽整个 TIM2 IRQ，避免切换过程中进入回调。 */
+  HAL_NVIC_DisableIRQ(TIM2_IRQn);
+
+  __HAL_TIM_DISABLE_IT(&htim2, TIM_IT_CC1);
+  __HAL_TIM_DISABLE_IT(&htim2, TIM_IT_CC2);
+  __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_CC1);
+  __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_CC2);
+
+  capture_state = 0;
+  timestamp1 = 0;
+  timestamp2 = 0;
+  frequency_valid = 0;
+  period_requests_gate = 0;
+
+  interval_waiting_ch2 = 0;
+  interval_start_timestamp = 0;
+  interval_end_timestamp = 0;
+
+  if (new_mode == INSTRUMENT_MODE_INTERVAL)
+  {
+    /*
+     * 时间间隔模式不需要频率闸门。
+     * 关闭 TIM4 后 TRGO 变 LOW；同时关闭 TIM1，避免无意义的外部计数。
+     */
+    __HAL_TIM_DISABLE(&htim4);
+    __HAL_TIM_DISABLE(&htim1);
+
+    __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
+    __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+    HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
+    HAL_NVIC_ClearPendingIRQ(TIM1_UP_IRQn);
+
+    gate_ready = 0;
+    tim1_overflow_count = 0;
+    __HAL_TIM_SET_COUNTER(&htim1, 0);
+    __HAL_TIM_SET_COUNTER(&htim4, 0);
+
+    interval_ticks = 0;
+    interval_ns = 0;
+
+    /* A、B 两路输入捕获都需要中断。 */
+    __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_CC1);
+    __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_CC2);
+  }
+  else
+  {
+    /*
+     * FREQUENCY / PERIOD 模式：
+     * CH1 用于低频周期法；CH2 不参与，避免无意义的 CH2 中断。
+     */
+    frequency_method = FREQUENCY_METHOD_PERIOD;
+    measured_frequency_hz = 0;
+    measured_period_ns = 0;
+    frequency_hz = 0;
+    frequency_millihz = 0;
+    period_ticks = 0;
+    period_ns = 0;
+    gate_frequency_hz = 0;
+    gate_frequency_valid = 0;
+
+    __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_CC1);
+
+    /* 重启 TIM1 + TIM4 硬件闸门测量链。 */
+    tim1_overflow_count = 0;
+    __HAL_TIM_SET_COUNTER(&htim1, 0);
+    __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+    HAL_NVIC_ClearPendingIRQ(TIM1_UP_IRQn);
+
+    __HAL_TIM_SET_COUNTER(&htim4, 0);
+    __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
+    HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
+    gate_ready = 0;
+
+    /* 先准备脉冲计数器，再开启 One Pulse 闸门。 */
+    __HAL_TIM_ENABLE(&htim1);
+    __HAL_TIM_ENABLE(&htim4);
+  }
+
+  instrument_mode = new_mode;
+  instrument_mode_initialized = 1;
+
+  HAL_NVIC_ClearPendingIRQ(TIM2_IRQn);
+  HAL_NVIC_EnableIRQ(TIM2_IRQn);
+}
 
 /* USER CODE END 0 */
 
@@ -169,12 +298,6 @@ int main(void)
   /*
    * HAL_TIM_Base_Start_IT(&htim2)
    * 作用：启动 TIM2 的基本计数功能，并使能 TIM2 的 Update（更新/溢出）中断。
-   * 参数：
-   *   &htim2 -> TIM2 的 HAL 句柄地址，告诉 HAL 本次操作的是 TIM2。
-   * 返回值：
-   *   HAL_OK    -> 启动成功。
-   *   非 HAL_OK -> 启动失败，因此进入 Error_Handler()。
-   * 当前项目用途：让 TIM2 的 CNT 持续计数，并在 CNT 溢出时累计 tim2_overflow_count。
    */
   if (HAL_TIM_Base_Start_IT(&htim2) != HAL_OK)
   {
@@ -182,50 +305,28 @@ int main(void)
   }
 
   /*
-   * HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1)
-   * 作用：启动 TIM2 通道 1 的 Input Capture（输入捕获）并开启捕获中断。
-   * 参数：
-   *   &htim2        -> TIM2 句柄地址。
-   *   TIM_CHANNEL_1 -> PA0 / TIM2_CH1。
-   * 当前项目用途：低频/中频时执行周期法测频。
-   * 高频切换到闸门法后，只关闭 CC1 中断，不关闭 TIM2 本身。
+   * 先把 CH1、CH2 两个输入捕获通道都启动。
+   * Instrument_SetMode() 会根据仪器功能模式决定哪些捕获中断真正保持开启。
    */
   if (HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /*
-   * 启动 TIM2_CH2 输入捕获中断
-   * PA1 上升沿到来时：
-   *   TIM2 当前 CNT -> CCR2
-   *   然后进入 HAL_TIM_IC_CaptureCallback()
-   */
   if (HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /*
-   * HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1)
-   * 作用：启动 TIM3 通道 1 的 PWM 输出。
-   * 参数：
-   *   &htim3        -> TIM3 的 HAL 句柄地址。
-   *   TIM_CHANNEL_1 -> 使用 TIM3 通道 1，即当前的 PA6 / TIM3_CH1。
-   * 当前项目用途：产生约 1 kHz、50% 占空比的测试方波。
-   */
+  /* TIM3_CH1：产生约 1 kHz、50% 占空比的测试方波。 */
   if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /* PWM 已经开始，再准备第一次硬件闸门测量。 */
-  tim1_overflow_count = 0;
-
   /*
-   * TIM1：外部脉冲计数器。
-   * PA12 / TIM1_ETR 提供被测脉冲；
-   * TIM4_TRGO 通过 ITR3 控制 TIM1 的 Gated Mode。
+   * TIM1 / TIM4 的 Update 中断只在这里通过 HAL 启动一次。
+   * 后续模式切换只操作 CEN 和具体中断源，不反复调用 Start_IT，避免 HAL 状态机冲突。
    */
   __HAL_TIM_SET_COUNTER(&htim1, 0);
   __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
@@ -236,13 +337,6 @@ int main(void)
     Error_Handler();
   }
 
-  /*
-   * 此时 TIM1 的 CEN 已经打开，
-   * 但 TIM4 尚未启动，TRGO 仍为 LOW，
-   * 所以 TIM1 的 Gate 关闭，不会统计 PA12 输入脉冲。
-   */
-
-  /* TIM4：启动第一次 1 秒 One Pulse 硬件闸门。 */
   __HAL_TIM_SET_COUNTER(&htim4, 0);
   __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
   HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
@@ -251,6 +345,9 @@ int main(void)
   {
     Error_Handler();
   }
+
+  /* 默认进入频率测量模式；后续菜单/按键也统一调用 Instrument_SetMode()。 */
+  Instrument_SetMode(INSTRUMENT_MODE_FREQUENCY);
 
   /* USER CODE END 2 */
 
@@ -263,22 +360,18 @@ int main(void)
     /* USER CODE BEGIN 3 */
 
     /*
-     * 周期法频率结果超时检测。
-     *
-     * 只在 PERIOD 模式下执行：GATE 模式会主动关闭 TIM2_CC1 中断，
-     * 此时没有新的 CH1 捕获是正常现象，不能当成输入信号丢失。
+     * FREQUENCY / PERIOD 模式都需要周期结果有效性检测。
+     * GATE 方法关闭 CH1 捕获是正常行为，因此只有 PERIOD 方法才做超时判断。
      */
-    if ((frequency_method == FREQUENCY_METHOD_PERIOD) &&
+    if ((instrument_mode != INSTRUMENT_MODE_INTERVAL) &&
+        (frequency_method == FREQUENCY_METHOD_PERIOD) &&
         frequency_valid &&
         ((uint32_t)(HAL_GetTick() - last_capture_tick_ms) > FREQUENCY_TIMEOUT_MS))
     {
-      /*
-       * TIM2 捕获中断可能与主循环超时判断同时发生。
-       * 暂时关闭 TIM2 IRQ 后再复查一次，避免刚到的新边沿被误判为超时。
-       */
       HAL_NVIC_DisableIRQ(TIM2_IRQn);
 
-      if ((frequency_method == FREQUENCY_METHOD_PERIOD) &&
+      if ((instrument_mode != INSTRUMENT_MODE_INTERVAL) &&
+          (frequency_method == FREQUENCY_METHOD_PERIOD) &&
           frequency_valid &&
           ((uint32_t)(HAL_GetTick() - last_capture_tick_ms) > FREQUENCY_TIMEOUT_MS))
       {
@@ -297,12 +390,12 @@ int main(void)
     }
 
     /*
-     * PERIOD -> GATE：
-     * 周期法已经判断 period_ticks <= 7200（约 >= 10 kHz）时，
-     * CC1 中断已经在捕获 ISR 内立即关闭，避免更高频输入继续打断 CPU。
-     * 主循环这里只负责完成软件测量模式切换和状态清理。
+     * FREQUENCY / PERIOD 模式内部：PERIOD -> GATE。
+     * CC1 中断已经在捕获 ISR 内立即关闭，主循环只负责切换软件状态。
      */
-    if ((frequency_method == FREQUENCY_METHOD_PERIOD) && period_requests_gate)
+    if ((instrument_mode != INSTRUMENT_MODE_INTERVAL) &&
+        (frequency_method == FREQUENCY_METHOD_PERIOD) &&
+        period_requests_gate)
     {
       measured_frequency_hz = frequency_hz;
 
@@ -313,22 +406,17 @@ int main(void)
       period_requests_gate = 0;
       frequency_valid = 0;
       capture_state = 0;
-      interval_waiting_ch2 = 0;
     }
 
-    if (gate_ready)
+    if ((instrument_mode != INSTRUMENT_MODE_INTERVAL) && gate_ready)
     {
-      /* TIM4 已经关闭 Gate，此时 TIM1 不再接收外部脉冲 */
-
+      /* TIM4 已经关闭 Gate，此时 TIM1 不再接收外部脉冲。 */
       HAL_NVIC_DisableIRQ(TIM1_UP_IRQn);
 
       uint32_t overflow_snapshot = tim1_overflow_count;
       uint32_t counter_snapshot = __HAL_TIM_GET_COUNTER(&htim1);
 
-      /*
-       * 极端情况：
-       * TIM1 已经溢出，但 Update ISR 还没来得及执行。
-       */
+      /* TIM1 已溢出但 ISR 尚未来得及执行时，补记这一次溢出。 */
       if (__HAL_TIM_GET_FLAG(&htim1, TIM_FLAG_UPDATE) != RESET)
       {
         overflow_snapshot++;
@@ -338,20 +426,13 @@ int main(void)
           overflow_snapshot * 65536UL + counter_snapshot;
       gate_frequency_valid = 1;
 
-      /*
-       * 当前使用闸门法时，1 秒闸门结果就是最终测频结果。
-       * 当结果下降到 7 kHz 或更低时，切回周期法。
-       */
       if (frequency_method == FREQUENCY_METHOD_GATE)
       {
         measured_frequency_hz = gate_frequency_hz;
 
+        /* 下降到 7 kHz 或更低时切回周期法。 */
         if (gate_frequency_hz <= GATE_TO_PERIOD_HZ)
         {
-          /*
-           * 重新进入周期法前，清掉旧捕获状态。
-           * 下一次必须重新收到两个 CH1 上升沿，才能形成新的周期结果。
-           */
           frequency_method = FREQUENCY_METHOD_PERIOD;
           frequency_valid = 0;
           period_requests_gate = 0;
@@ -360,67 +441,63 @@ int main(void)
           period_ns = 0;
           timestamp1 = 0;
           timestamp2 = 0;
-          interval_waiting_ch2 = 0;
 
-          /*
-           * GATE 模式期间 CCR1 仍可能被硬件更新并留下 CC1IF。
-           * 先清旧标志，再重新允许 CC1 捕获中断。
-           */
           __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_CC1);
           __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_CC1);
         }
       }
 
-      /* 准备下一轮 */
+      /* 准备下一轮 1 秒硬件闸门。 */
       tim1_overflow_count = 0;
-
       __HAL_TIM_SET_COUNTER(&htim1, 0);
-
       __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
       HAL_NVIC_ClearPendingIRQ(TIM1_UP_IRQn);
 
       gate_ready = 0;
-
       HAL_NVIC_EnableIRQ(TIM1_UP_IRQn);
 
-      /*
-       * TIM1 不需要重新启动：
-       * 它的 CEN 仍然开着，只是由于 TIM4 TRGO=LOW，
-       * Gated Mode 暂停了计数。
-       *
-       * 这里只需要重新启动 TIM4 One Pulse。
-       */
       __HAL_TIM_SET_COUNTER(&htim4, 0);
       __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
       HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
-
       __HAL_TIM_ENABLE(&htim4);
     }
 
     /*
-     * 最终输出选择：
-     * - PERIOD 模式且周期结果有效：使用周期法；
-     * - PERIOD 模式正在等待两个边沿时：若已有闸门结果，则暂时使用闸门结果兜底；
-     * - GATE 模式：使用最近一次 1 秒闸门结果。
+     * FREQUENCY / PERIOD 共用同一个最终测量结果。
+     * PERIOD 模式只是把最终结果转换成周期显示，不重新建立另一套高频测量链。
      */
-    if (frequency_method == FREQUENCY_METHOD_PERIOD)
+    if (instrument_mode != INSTRUMENT_MODE_INTERVAL)
     {
-      if (frequency_valid)
+      if (frequency_method == FREQUENCY_METHOD_PERIOD)
       {
-        measured_frequency_hz = frequency_hz;
+        if (frequency_valid)
+        {
+          measured_frequency_hz = frequency_hz;
+          measured_period_ns = period_ns;
+        }
+        else if (gate_frequency_valid)
+        {
+          measured_frequency_hz = gate_frequency_hz;
+        }
+        else
+        {
+          measured_frequency_hz = 0;
+          measured_period_ns = 0;
+        }
       }
       else if (gate_frequency_valid)
       {
         measured_frequency_hz = gate_frequency_hz;
       }
-      else
+
+      /* 高频使用闸门法时，根据最终频率反算周期。 */
+      if ((frequency_method == FREQUENCY_METHOD_GATE) &&
+          (measured_frequency_hz != 0U))
       {
-        measured_frequency_hz = 0;
+        measured_period_ns =
+            (NANOSECONDS_PER_SECOND + measured_frequency_hz / 2U) /
+            measured_frequency_hz;
       }
-    }
-    else if (gate_frequency_valid)
-    {
-      measured_frequency_hz = gate_frequency_hz;
     }
   }
   /* USER CODE END 3 */
@@ -469,16 +546,12 @@ void SystemClock_Config(void)
 
 /*
  * HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
- * 作用：HAL 的输入捕获回调函数。当已经启用输入捕获中断的通道发生捕获事件时，HAL 会调用它。
- * 参数：
- *   htim -> 触发本次回调的定时器句柄指针。
- * 当前项目用途：
- *   TIM2_CH1 -> 周期法测频，以及 A 信号时间戳；
- *   TIM2_CH2 -> B 信号时间戳。
+ *
+ * FREQUENCY / PERIOD：CH1 负责自动测量引擎中的周期法入口。
+ * INTERVAL：CH1 作为 A，CH2 作为 B，只计算 A -> B 时间间隔。
  */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
-  /* 这个回调目前只处理 TIM2 */
   if (htim->Instance != TIM2)
   {
     return;
@@ -487,47 +560,34 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
   /* ==================== TIM2_CH1 / PA0 ==================== */
   if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
   {
-    /*
-     * CH1 输入捕获：
-     * PA0 上升沿到来时，硬件已经自动完成：
-     *
-     * TIM2_CNT -> CCR1
-     */
     uint32_t capture =
         HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 
-    /* 拍下当前 TIM2 软件溢出次数 */
     uint32_t overflow_snapshot = tim2_overflow_count;
 
-    /*
-     * 处理捕获与溢出几乎同时发生的边界情况。
-     *
-     * UIF = 1：
-     *   TIM2 已经溢出；
-     *
-     * capture 很小：
-     *   说明本次捕获大概率发生在溢出之后。
-     */
     if ((__HAL_TIM_GET_FLAG(htim, TIM_FLAG_UPDATE) != RESET) &&
         (capture < 32768U))
     {
       overflow_snapshot++;
     }
 
-    /*
-     * 把：
-     *
-     * 溢出次数 + CCR1
-     *
-     * 拼成同一条连续的 64 位时间轴。
-     */
     uint64_t current_timestamp =
         (uint64_t)overflow_snapshot * 65536ULL + capture;
 
-    /* 记录最近一次 CH1 上升沿，用于主循环判断周期法结果是否超时。 */
+    /* INTERVAL 模式：CH1 只负责记录 A 到达时刻。 */
+    if (instrument_mode == INSTRUMENT_MODE_INTERVAL)
+    {
+      if (interval_waiting_ch2 == 0)
+      {
+        interval_start_timestamp = current_timestamp;
+        interval_waiting_ch2 = 1;
+      }
+      return;
+    }
+
+    /* FREQUENCY / PERIOD：CH1 执行周期法。 */
     last_capture_tick_ms = HAL_GetTick();
 
-    /* ---------- CH1 周期法测频 ---------- */
     if (capture_state == 0)
     {
       timestamp1 = current_timestamp;
@@ -536,7 +596,6 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
     else
     {
       timestamp2 = current_timestamp;
-
       period_ticks = timestamp2 - timestamp1;
 
       if (period_ticks != 0)
@@ -555,14 +614,11 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
              TIM2_COUNTER_HZ / 2ULL) /
             TIM2_COUNTER_HZ;
 
-        /* 已经获得完整周期，本次周期法频率结果有效。 */
         frequency_valid = 1;
 
         /*
-         * 周期短到 7200 tick 或更小时，说明应该立即转入闸门法。
-         * 如果输入突然跳到 MHz 量级，等待主循环再关闭 CC1 可能来不及，
-         * 所以在当前捕获 ISR 内先关闭 CC1 中断源，阻止后续边沿继续打断 CPU。
-         * 主循环随后根据 period_requests_gate 完成软件状态切换。
+         * 约 >= 10 kHz 时立即关闭 CC1 中断，避免 MHz 输入淹没 CPU。
+         * 主循环随后完成 PERIOD -> GATE 软件状态切换。
          */
         if (period_ticks <= PERIOD_TO_GATE_TICKS)
         {
@@ -571,37 +627,24 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
         }
       }
 
-      /* 当前边沿成为下一次测量的“上一次边沿” */
       timestamp1 = timestamp2;
-    }
-
-    /* ---------- A -> B 时间间隔测量起点 ---------- */
-    if (interval_waiting_ch2 == 0)
-    {
-      /*
-       * CH1 这次上升沿作为 A 信号。
-       * 保存 A 到达时刻，然后等待 CH2 的 B 信号。
-       */
-      interval_start_timestamp = current_timestamp;
-      interval_waiting_ch2 = 1;
     }
   }
 
   /* ==================== TIM2_CH2 / PA1 ==================== */
   else if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_2)
   {
-    /*
-     * CH2 输入捕获：
-     * PA1 上升沿到来时，硬件已经自动完成：
-     *
-     * TIM2_CNT -> CCR2
-     */
+    /* CH2 只属于 A -> B 时间间隔模式。 */
+    if (instrument_mode != INSTRUMENT_MODE_INTERVAL)
+    {
+      return;
+    }
+
     uint32_t capture =
         HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2);
 
     uint32_t overflow_snapshot = tim2_overflow_count;
 
-    /* 和 CH1 一样处理溢出边界 */
     if ((__HAL_TIM_GET_FLAG(htim, TIM_FLAG_UPDATE) != RESET) &&
         (capture < 32768U))
     {
@@ -611,24 +654,9 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
     uint64_t current_timestamp =
         (uint64_t)overflow_snapshot * 65536ULL + capture;
 
-    /*
-     * 只有已经收到 CH1 的 A 信号，
-     * CH2 的 B 信号才有意义。
-     */
     if (interval_waiting_ch2 == 1)
     {
       interval_end_timestamp = current_timestamp;
-
-      /*
-       * B - A = 两路信号之间经历的 TIM2 tick 数。
-       *
-       * TIM2 当前计数频率为 72 MHz：
-       *
-       * 1 tick ≈ 13.8889 ns
-       *
-       * 因此 interval_ticks 是原始硬件计数值，
-       * interval_ns 才是换算后的实际时间。
-       */
       interval_ticks =
           interval_end_timestamp - interval_start_timestamp;
 
@@ -637,10 +665,6 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
            TIM2_COUNTER_HZ / 2ULL) /
           TIM2_COUNTER_HZ;
 
-      /*
-       * 本次 A -> B 测量结束。
-       * 下一次重新等待新的 CH1。
-       */
       interval_waiting_ch2 = 0;
     }
   }
@@ -648,9 +672,6 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 
 /*
  * HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
- * 作用：HAL 的定时器周期/Update 回调。当启用了 Update 中断的定时器发生更新事件时调用。
- * 参数：
- *   htim -> 发生 Update Event 的定时器句柄指针。
  * 当前项目中三个来源：
  *   TIM1 -> 16 位外部脉冲计数器溢出。
  *   TIM2 -> 16 位时间计数器溢出。
@@ -660,9 +681,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM1)
   {
-    /* TIM1 负责统计外部脉冲；
-     * 每溢出一次代表又累计了 65536 个脉冲。
-     */
     tim1_overflow_count++;
   }
   else if (htim->Instance == TIM2)
@@ -671,19 +689,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   }
   else if (htim->Instance == TIM4)
   {
-    /*
-     * TIM4 的 1 秒 One Pulse 已结束。
-     *
-     * 注意：
-     * 此时硬件已经自动：
-     *
-     * CEN -> 0
-     * TRGO -> LOW
-     *
-     * TIM1 的 Gate 已经关闭，
-     * 所以这里只负责通知主循环读取结果。
-     */
-    gate_ready = 1;
+    /* INTERVAL 模式下闸门链已经关闭，不产生测频完成事件。 */
+    if (instrument_mode != INSTRUMENT_MODE_INTERVAL)
+    {
+      gate_ready = 1;
+    }
   }
 }
 
