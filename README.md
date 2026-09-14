@@ -170,44 +170,45 @@ flowchart LR
     STRAT --> OUT
 ```
 
-### 2）Timer 之间的直接关系
+### 2）Timer 之间的直接关系（mermaid）
 
-```text
-TIM3
- └─ 内部测试信号源（PA6 输出 PWM）
-    ├─ 可接到 PA0，供 TIM2 做周期法 / DUTY 测试
-    └─ 可接到 PA12，供 TIM1 做闸门计数测试
+```mermaid
+flowchart TD
+    T3["TIM3 / PWM测试信号源 / PA6"]
+    T2F["TIM2 / FREQUENCY-PERIOD / CH1输入捕获"]
+    T2D["TIM2 / DUTY / PWM Input"]
+    T2I["TIM2 / INTERVAL / CH1=A CH2=B"]
+    T4["TIM4 / 1秒One Pulse / TRGO"]
+    T1["TIM1 / ETR外部脉冲计数 / Gated Mode"]
+    STRAT["软件策略层 / 模式切换 / 自动量程 / 有效性"]
 
-TIM4
- └─ 1 秒 One Pulse 硬件闸门
-    └─ TRGO 通过 ITR3 控制 TIM1 的 Gated Mode
-
-TIM1
- └─ 在 TIM4 打开的 1 秒时间窗内统计外部脉冲数
-
-TIM2
- ├─ FREQUENCY / PERIOD：CH1 输入捕获，做高分辨率周期法
- ├─ DUTY：PWM Input，同一根 PA0 同时锁存周期和高电平时间
- └─ INTERVAL：CH1=A、CH2=B，测 A→B 时间间隔
+    T3 -->|测试方波| T2F
+    T3 -->|测试方波| T2D
+    T3 -->|测试方波| T1
+    T4 -->|ITR3 / Gate| T1
+    T2F --> STRAT
+    T2D --> STRAT
+    T2I --> STRAT
+    T1 --> STRAT
+    T4 --> STRAT
 ```
 
-### 3）当前核心关系（简图）
+### 3）当前核心关系（mermaid 简图）
 
-```text
-                 被测数字信号
-                /           \
-               /             \
-        PA0 / TIM2          PA12 / TIM1_ETR
-            │                     │
-   周期 / PWM Input          外部脉冲计数
-            │                     │
-            │                 TIM1 Gated
-            │                     ▲
-            │                     │ ITR3
-            │                 TIM4 TRGO
-            │                 1 s One Pulse
-            │
-            └────── 软件策略层 ──────┘
+```mermaid
+flowchart LR
+    SIG["被测数字信号"]
+    T2["PA0 / TIM2 / 周期或PWM Input"]
+    T1["PA12 / TIM1_ETR / 外部脉冲计数"]
+    T4["TIM4 / 1s One Pulse / TRGO"]
+    STRAT["软件策略层"]
+
+    SIG --> T2
+    SIG --> T1
+    T4 -->|ITR3| T1
+    T2 --> STRAT
+    T1 --> STRAT
+    T4 --> STRAT
 ```
 
 测试时可以使用 TIM3 的 PA6 作为已知信号源，再把同一信号分配到对应测量输入。
