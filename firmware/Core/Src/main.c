@@ -127,13 +127,13 @@ static volatile uint32_t measured_frequency_hz = 0;                         // �
 static volatile uint64_t measured_period_ns = 0;                            // 对上层提供的最终周期结果，单位：ns
 
 // ==================== DUTY：TIM2 PWM Input 硬件锁存结果 ====================
-static volatile uint32_t duty_period_ticks = 0;                 // PWM Input 的 CCR1 周期值，单位：当前 TIM2 tick
-static volatile uint32_t duty_high_ticks = 0;                   // PWM Input 的 CCR2 高电平时间，单位：当前 TIM2 tick
-static volatile uint16_t measured_duty_permille = 0;            // 最终占空比千分数：0~1000 对应 0.0%~100.0%
+static volatile uint32_t duty_period_ticks = 0;                   // PWM Input 的 CCR1 周期值，单位：当前 TIM2 tick
+static volatile uint32_t duty_high_ticks = 0;                     // PWM Input 的 CCR2 高电平时间，单位：当前 TIM2 tick
+static volatile uint16_t measured_duty_permille = 0;              // 最终占空比千分数：0~1000 对应 0.0%~100.0%
 static volatile uint16_t duty_prescaler = DUTY_DEFAULT_PRESCALER; // DUTY 模式当前 TIM2 PSC，用于自动量程
-static volatile uint32_t last_duty_capture_tick_ms = 0;         // 最近一次有效 PWM Input 结果的 HAL tick，用于超时失效
-static volatile uint8_t duty_capture_synced = 0;                // 0=刚进入/重配 PWM Input 尚未同步完整周期，1=已同步
-static volatile uint8_t duty_valid = 0;                         // 1=当前 duty_period/high/permille 是可信结果
+static volatile uint32_t last_duty_capture_tick_ms = 0;           // 最近一次有效 PWM Input 结果的 HAL tick，用于超时失效
+static volatile uint8_t duty_capture_synced = 0;                  // 0=刚进入/重配 PWM Input 尚未同步完整周期，1=已同步
+static volatile uint8_t duty_valid = 0;                           // 1=当前 duty_period/high/permille 是可信结果
 
 // ==================== TIM1：1 秒硬件闸门内统计外部脉冲 ====================
 static volatile uint32_t gate_frequency_hz = 0;   // TIM1 在 1 秒 Gate 内的总脉冲数；1 秒窗下即约等于 Hz
@@ -148,15 +148,15 @@ static volatile uint8_t gate_ready = 0; // 1=TIM4 本轮 One Pulse 已结束，�
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-static void Instrument_SetMode(InstrumentMode new_mode);
-static uint8_t Instrument_IsFrequencyPeriodMode(InstrumentMode mode);
-static void Gate_Stop(void);
-static void Gate_StartFresh(void);
-static void TIM2_ConfigureTimestampCapture(uint8_t enable_ch2_interrupt);
-static void TIM2_ConfigureDutyCapture(uint16_t prescaler);
-static uint16_t Duty_CalculatePrescaler(uint32_t gate_frequency);
-static void Duty_ApplyPrescaler(uint16_t prescaler);
-static void Duty_ProcessCapture(void);
+static void Instrument_SetMode(InstrumentMode new_mode);                         // 统一仪器模式切换入口
+static uint8_t Instrument_IsFrequencyPeriodMode(InstrumentMode mode);            // 判断模式是否属于 FREQUENCY / PERIOD 共享引擎
+static void Gate_Stop(void);                                                     // 停止并清理 TIM1 + TIM4 闸门链
+static void Gate_StartFresh(void);                                               // 从干净状态启动新一轮 1 秒闸门
+static void TIM2_ConfigureTimestampCapture(uint8_t enable_ch2_interrupt);         // 配置 TIM2 普通时间戳输入捕获
+static void TIM2_ConfigureDutyCapture(uint16_t prescaler);                        // 配置 TIM2 PWM Input 占空比捕获
+static uint16_t Duty_CalculatePrescaler(uint32_t gate_frequency);                 // 根据粗频率计算 DUTY 模式 TIM2 PSC
+static void Duty_ApplyPrescaler(uint16_t prescaler);                             // 应用新的 DUTY PSC 并使旧结果失效
+static void Duty_ProcessCapture(void);                                            // 主循环读取 PWM Input CCR 并更新占空比
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -169,13 +169,24 @@ static void Duty_ProcessCapture(void);
  * 3. 函数名带 _IT：Interrupt，表示配合中断使用。
  */
 
+/**
+ * @brief 判断指定仪器模式是否属于 FREQUENCY / PERIOD 共享测量引擎。
+ * @param mode 待判断的仪器功能模式。
+ * @retval 1 表示是 FREQUENCY 或 PERIOD；0 表示是 DUTY 或 INTERVAL。
+ * @note 这是纯判断函数，不修改任何硬件寄存器或测量状态。
+ */
 static uint8_t Instrument_IsFrequencyPeriodMode(InstrumentMode mode)
 {
   return (mode == INSTRUMENT_MODE_FREQUENCY) ||
          (mode == INSTRUMENT_MODE_PERIOD);
 }
 
-/* 停止 TIM1 + TIM4 硬件闸门链。 */
+/**
+ * @brief 停止 TIM1 + TIM4 硬件闸门链，并把闸门运行状态清理到可重新启动的状态。
+ * @note 会关闭 TIM1/TIM4 的 CEN，清除 Update 标志和 Pending IRQ，并把两个 CNT 清零。
+ * @note 同时清除 gate_ready 和 tim1_overflow_count；不会主动清除 gate_frequency_hz。
+ * @note 进入 INTERVAL 模式，或 Gate_StartFresh() 重新启动闸门前会调用本函数。
+ */
 static void Gate_Stop(void)
 {
   __HAL_TIM_DISABLE(&htim4);
@@ -192,7 +203,12 @@ static void Gate_Stop(void)
   __HAL_TIM_SET_COUNTER(&htim4, 0);
 }
 
-/* 从一个干净状态重新开始 1 秒闸门。 */
+/**
+ * @brief 从干净状态启动新一轮 1 秒硬件闸门测量。
+ * @note 先调用 Gate_Stop() 清理旧状态，再清除旧闸门结果有效性。
+ * @note 启动顺序固定为：先使能 TIM1，再使能 TIM4；TIM4 TRGO 拉高后才真正打开 TIM1 Gated Mode。
+ * @note 这样可以保证计数器已经准备好，再开始 1 秒时间窗，避免窗口起点丢脉冲。
+ */
 static void Gate_StartFresh(void)
 {
   Gate_Stop();
@@ -207,12 +223,12 @@ static void Gate_StartFresh(void)
   __HAL_TIM_ENABLE(&htim4);
 }
 
-/*
- * 恢复 CubeMX 的普通 TIM2 输入捕获结构：
- * CH1 = TI1 / PA0 上升沿；CH2 = TI2 / PA1 上升沿；PSC=0；无 Slave Mode。
- *
- * enable_ch2_interrupt=0：FREQUENCY / PERIOD
- * enable_ch2_interrupt=1：INTERVAL
+/**
+ * @brief 把 TIM2 配置为普通“自由运行时间轴 + 输入捕获”模式。
+ * @param enable_ch2_interrupt 0=只启用 CH1 捕获中断，用于 FREQUENCY/PERIOD；1=同时启用 CH2，用于 INTERVAL。
+ * @note CH1 直接映射 TI1/PA0，CH2 直接映射 TI2/PA1，两个通道均捕获上升沿。
+ * @note TIM2 使用 PSC=0、ARR=65535，并开启 Update 中断，用 tim2_overflow_count 扩展 16 位 CNT。
+ * @note 本函数也负责退出 DUTY 使用的 PWM Input Reset Mode，并清除旧标志、CNT 和溢出状态。
  */
 static void TIM2_ConfigureTimestampCapture(uint8_t enable_ch2_interrupt)
 {
@@ -250,13 +266,13 @@ static void TIM2_ConfigureTimestampCapture(uint8_t enable_ch2_interrupt)
   __HAL_TIM_ENABLE(&htim2);
 }
 
-/*
- * TIM2 PWM Input（同一根 PA0 / TI1）：
- *   CCR1：相邻两个上升沿之间的周期
- *   CCR2：上升沿到下降沿之间的高电平时间
- *   TI1FP1 上升沿同时把 CNT Reset 为 0
- *
- * 整个过程由硬件持续锁存，不打开 CC1/CC2 中断，因此 MHz 输入不会制造 MHz 级 ISR。
+/**
+ * @brief 把 TIM2 配置为 DUTY 模式使用的 PWM Input。
+ * @param prescaler 写入 TIM2 PSC 的值；实际计数时钟分频系数为 prescaler + 1。
+ * @note 同一根 PA0/TI1 同时进入两个捕获通道：CH1 上升沿锁存周期，CH2 下降沿锁存高电平时间。
+ * @note TIM2 使用 Slave Reset Mode，每个上升沿会把 CNT 自动归零，为下一周期重新计时。
+ * @note DUTY 模式关闭 CC1/CC2 与 Update 中断，主循环直接轮询捕获标志和 CCR，避免高频输入产生 ISR 风暴。
+ * @note 每次重新配置后会清空 duty_valid，并要求重新同步至少一个完整周期。
  */
 static void TIM2_ConfigureDutyCapture(uint16_t prescaler)
 {
@@ -294,9 +310,13 @@ static void TIM2_ConfigureDutyCapture(uint16_t prescaler)
   __HAL_TIM_ENABLE(&htim2);
 }
 
-/*
- * 根据 1 秒闸门得到的粗频率，自动选择 TIM2 PSC。
- * 使用 gate_count-1 作为保守的频率下界，避免低频 ±1 count 误差导致周期溢出。
+/**
+ * @brief 根据 1 秒闸门得到的粗频率，计算 DUTY 模式下一轮应使用的 TIM2 PSC。
+ * @param gate_frequency TIM1 + TIM4 1 秒 Gate 得到的粗频率，单位：Hz。
+ * @retval 适合写入 TIM2 PSC 寄存器的值，范围 0~65535。
+ * @note 目标是让一个 PWM 周期尽量不超过 DUTY_TARGET_PERIOD_TICKS（当前 60000 tick）。
+ * @note 对 gate_frequency 使用 -1 的保守下界，避免低频 Gate 的 ±1 count 误差导致 PSC 选得过小而溢出。
+ * @note gate_frequency=0 时无法估算新量程，因此保持当前 duty_prescaler 不变。
  */
 static uint16_t Duty_CalculatePrescaler(uint32_t gate_frequency)
 {
@@ -328,7 +348,13 @@ static uint16_t Duty_CalculatePrescaler(uint32_t gate_frequency)
   return (uint16_t)(divider - 1ULL);
 }
 
-/* 改 PSC 后必须重新同步 PWM Input，不能继续使用旧 CCR。 */
+/**
+ * @brief 在 DUTY 模式中应用新的 TIM2 PSC，并让旧占空比结果立即失效。
+ * @param prescaler 新的 TIM2 PSC 寄存器值。
+ * @note 如果新 PSC 与当前 duty_prescaler 相同，则直接返回，不重新配置 TIM2。
+ * @note PSC 改变后一个 tick 的时间尺度已经变化，因此旧 CCR、旧占空比结果不能继续使用。
+ * @note 本函数会重新产生 Update Event 让 PSC 生效，并把 duty_capture_synced 置 0，等待新的完整周期重新同步。
+ */
 static void Duty_ApplyPrescaler(uint16_t prescaler)
 {
   if (prescaler == duty_prescaler)
@@ -355,7 +381,14 @@ static void Duty_ApplyPrescaler(uint16_t prescaler)
   __HAL_TIM_ENABLE(&htim2);
 }
 
-/* 主循环轮询 PWM Input 的 CCR，不使用输入捕获中断。 */
+/**
+ * @brief 在主循环中轮询 TIM2 PWM Input 的捕获结果，并更新占空比测量值。
+ * @note 只在 INSTRUMENT_MODE_DUTY 下由 while(1) 调用，不依赖输入捕获 ISR。
+ * @note 只有 CC1 和 CC2 都出现新捕获后才同时读取 CCR1/CCR2，分别作为周期和高电平时间。
+ * @note 进入 DUTY 或修改 PSC 后的第一轮捕获会被丢弃，用于确保 CCR1/CCR2 已经对应完整且同步的 PWM 周期。
+ * @note 有效结果最终写入 duty_period_ticks、duty_high_ticks、measured_duty_permille，并设置 duty_valid=1。
+ * @note 超过 DUTY_TIMEOUT_MS 没有新的完整捕获时，会使旧占空比结果失效。
+ */
 static void Duty_ProcessCapture(void)
 {
   uint32_t period_capture; // 本次从 CCR1 读取到的完整 PWM 周期 tick
@@ -410,11 +443,14 @@ static void Duty_ProcessCapture(void)
   duty_valid = 1U;
 }
 
-/*
- * 仪器功能层：
- * FREQUENCY / PERIOD -> 普通 TIM2 时间戳 + TIM1/TIM4 自动测频
- * DUTY              -> TIM2 PWM Input + TIM1/TIM4 粗频率/自动 PSC
- * INTERVAL          -> TIM2 CH1(A) + CH2(B)，停止闸门链
+/**
+ * @brief 统一切换仪器功能模式，并完成对应 Timer 资源的重配置和状态清理。
+ * @param new_mode 目标仪器模式：FREQUENCY、PERIOD、DUTY 或 INTERVAL。
+ * @note FREQUENCY 与 PERIOD 共用完全相同的硬件测量链，互相切换时只改变 instrument_mode，不重启定时器。
+ * @note 切入 DUTY 时 TIM2 改成 PWM Input，TIM1+TIM4 保留 1 秒 Gate 用于粗频率和自动 PSC。
+ * @note 切入 INTERVAL 时 TIM2 使用 CH1=A、CH2=B，同时停止 TIM1+TIM4 Gate 链。
+ * @note 涉及 TIM2 重配置时会暂时屏蔽 TIM2_IRQn，防止配置中途进入 ISR 产生竞态。
+ * @note 这是未来按键、菜单、串口等上层交互切换测量功能时应调用的唯一入口。
  */
 static void Instrument_SetMode(InstrumentMode new_mode)
 {
@@ -673,8 +709,8 @@ int main(void)
     {
       HAL_NVIC_DisableIRQ(TIM1_UP_IRQn);
 
-      uint32_t overflow_snapshot = tim1_overflow_count;                // 读取快照时已经由 ISR 记录的 TIM1 溢出次数
-      uint32_t counter_snapshot = __HAL_TIM_GET_COUNTER(&htim1);       // Gate 结束后 TIM1 当前 16 位 CNT 快照
+      uint32_t overflow_snapshot = tim1_overflow_count;          // 读取快照时已经由 ISR 记录的 TIM1 溢出次数
+      uint32_t counter_snapshot = __HAL_TIM_GET_COUNTER(&htim1); // Gate 结束后 TIM1 当前 16 位 CNT 快照
 
       if (__HAL_TIM_GET_FLAG(&htim1, TIM_FLAG_UPDATE) != RESET)
       {
@@ -813,10 +849,13 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
-/*
- * FREQUENCY / PERIOD：CH1 执行普通输入捕获周期法。
- * INTERVAL：CH1=A，CH2=B。
- * DUTY：不进入本回调；CC1/CC2 中断被关闭，主循环直接读取 PWM Input 的 CCR。
+/**
+ * @brief TIM2 输入捕获中断的 HAL 回调，处理周期法和 A->B 时间间隔测量。
+ * @param htim 触发本次回调的定时器句柄；本项目只处理 TIM2，其他 TIM 会立即返回。
+ * @note FREQUENCY / PERIOD：只使用 CH1，连续两个上升沿构造 64 位时间戳并计算周期、频率。
+ * @note INTERVAL：CH1 作为 A 起点，CH2 作为 B 终点，计算 B-A。
+ * @note DUTY：不会使用本回调，因为 PWM Input 的 CC1/CC2 中断在 DUTY 模式中被关闭，主循环直接读 CCR。
+ * @note 回调内部处理 UIF 与 Capture 几乎同时发生的竞态，避免溢出边界导致 64 位时间戳错一圈 65536 tick。
  */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
@@ -955,10 +994,12 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
   }
 }
 
-/*
- * TIM1 -> 16 位外部脉冲计数器溢出
- * TIM2 -> 普通时间戳模式的 16 位 CNT 溢出
- * TIM4 -> 1 秒 One Pulse Gate 结束
+/**
+ * @brief HAL 定时器 Update/Period Elapsed 回调，统一处理 TIM1、TIM2、TIM4 的更新事件。
+ * @param htim 触发 Update 事件的定时器句柄。
+ * @note TIM1：16 位外部脉冲计数器溢出，tim1_overflow_count++。
+ * @note TIM2：普通时间戳模式下 16 位 CNT 溢出，tim2_overflow_count++；DUTY 模式不会使用该 Update 中断。
+ * @note TIM4：1 秒 One Pulse Gate 结束，置 gate_ready=1，让主循环快照 TIM1 并计算闸门频率。
  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
