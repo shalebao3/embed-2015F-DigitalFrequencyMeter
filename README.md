@@ -49,6 +49,67 @@ Instrument_SetMode(...)
 
 后续接按键、串口菜单或 TFT/LVGL 时，不需要让显示层直接操作底层 Timer。
 
+### 仪器模式状态切换图
+
+四种仪器模式属于“用户功能层”；其中 `FREQUENCY / PERIOD` 共享自动频率测量引擎，而 `DUTY` 和 `INTERVAL` 会重新配置 TIM2 的工作方式。
+
+```mermaid
+stateDiagram-v2
+    [*] --> FREQUENCY: 上电默认
+
+    FREQUENCY --> PERIOD: 选择周期显示
+    PERIOD --> FREQUENCY: 选择频率显示
+
+    FREQUENCY --> DUTY: 选择占空比
+    PERIOD --> DUTY: 选择占空比
+    DUTY --> FREQUENCY: 选择频率
+    DUTY --> PERIOD: 选择周期
+
+    FREQUENCY --> INTERVAL: 选择 A→B
+    PERIOD --> INTERVAL: 选择 A→B
+    DUTY --> INTERVAL: 选择 A→B
+    INTERVAL --> FREQUENCY: 选择频率
+    INTERVAL --> PERIOD: 选择周期
+    INTERVAL --> DUTY: 选择占空比
+
+    state FREQUENCY {
+        [*] --> PERIOD_METHOD
+        PERIOD_METHOD --> GATE_METHOD: >= 约10 kHz
+        GATE_METHOD --> PERIOD_METHOD: <= 约7 kHz
+    }
+```
+
+对应底层资源变化：
+
+```text
+FREQUENCY / PERIOD
+├─ TIM2_CH1：周期法入口
+├─ TIM1：外部脉冲计数
+├─ TIM4：1 s 硬件 Gate
+└─ 内部自动选择 PERIOD_METHOD / GATE_METHOD
+
+DUTY
+├─ TIM2：切成 PWM Input
+│  ├─ CCR1 = 周期
+│  └─ CCR2 = 高电平时间
+└─ TIM1 + TIM4：提供粗频率，辅助自动调整 TIM2 PSC
+
+INTERVAL
+├─ TIM2_CH1 = A
+├─ TIM2_CH2 = B
+└─ TIM1 + TIM4：停止，避免无意义计数
+```
+
+这里要注意两层概念：
+
+```text
+仪器功能模式：FREQUENCY / PERIOD / DUTY / INTERVAL
+
+频率测量内部策略：PERIOD_METHOD / GATE_METHOD
+```
+
+前者是以后用户通过按键或菜单选择的功能；后者是固件内部自动决定“怎么测”。
+
 ---
 
 ## 定时器资源分配
@@ -60,7 +121,77 @@ Instrument_SetMode(...)
 | **TIM3** | 内部测试信号源 | PWM Generation CH1 | PA6 / TIM3_CH1 | 输出约 1 kHz、50% 占空比测试 PWM |
 | **TIM4** | 1 秒硬件闸门 | One Pulse + TRGO Enable | 无外部输入 | 产生 1 秒 Gate，通过 ITR3 控制 TIM1 |
 
-当前核心关系：
+---
+
+## 各个定时器调用关系 / 配合框图
+
+### 1）整体协同框图
+
+```mermaid
+flowchart LR
+    SIG[被测输入信号]
+    T3[TIM3\nPWM测试信号源\nPA6]
+
+    subgraph FREQ[频率 / 周期测量链]
+      T2A[TIM2\n周期法\nInput Capture CH1\nPA0]
+      T1[TIM1\n外部脉冲计数\nETR + Gated\nPA12]
+      T4[TIM4\n1 s One Pulse Gate\nTRGO -> ITR3]
+    end
+
+    subgraph DUTY[占空比测量链]
+      T2D[TIM2\nPWM Input\nCCR1 = 周期\nCCR2 = 高电平]
+    end
+
+    subgraph INTERVAL[A→B 时间间隔测量链]
+      T2I[TIM2\nCH1 = A(PA0)\nCH2 = B(PA1)]
+    end
+
+    STRAT[软件策略层\n模式切换 / 自动量程 / 有效性]
+    OUT[测量结果\nfrequency / period / duty / interval]
+
+    T3 -->|测试方波| T2A
+    T3 -->|测试方波| T1
+    T3 -->|测试方波| T2D
+    T3 -->|可作 A 或 B 测试信号| T2I
+
+    SIG --> T2A
+    SIG --> T1
+    SIG --> T2D
+    SIG --> T2I
+
+    T4 -->|TRGO / ITR3 打开 1 秒闸门| T1
+
+    T2A --> STRAT
+    T1 --> STRAT
+    T4 --> STRAT
+    T2D --> STRAT
+    T2I --> STRAT
+
+    STRAT --> OUT
+```
+
+### 2）Timer 之间的直接关系
+
+```text
+TIM3
+ └─ 内部测试信号源（PA6 输出 PWM）
+    ├─ 可接到 PA0，供 TIM2 做周期法 / DUTY 测试
+    └─ 可接到 PA12，供 TIM1 做闸门计数测试
+
+TIM4
+ └─ 1 秒 One Pulse 硬件闸门
+    └─ TRGO 通过 ITR3 控制 TIM1 的 Gated Mode
+
+TIM1
+ └─ 在 TIM4 打开的 1 秒时间窗内统计外部脉冲数
+
+TIM2
+ ├─ FREQUENCY / PERIOD：CH1 输入捕获，做高分辨率周期法
+ ├─ DUTY：PWM Input，同一根 PA0 同时锁存周期和高电平时间
+ └─ INTERVAL：CH1=A、CH2=B，测 A→B 时间间隔
+```
+
+### 3）当前核心关系（简图）
 
 ```text
                  被测数字信号
@@ -119,503 +250,321 @@ ARR         = 65535
 因此：
 
 ```text
-1 tick = 1 / 72 MHz ≈ 13.8889 ns
+1 tick = 1 / 72 MHz ≈ 13.89 ns
 ```
 
-TIM2 是 16 位定时器，所以使用：
+### 1）FREQUENCY / PERIOD 模式
+
+TIM2_CH1 采集相邻两个上升沿，构造 64 位扩展时间戳：
 
 ```text
-tim2_overflow_count
+extended_timestamp = overflow_count × 65536 + CCR1
 ```
 
-把硬件 CNT 扩展成软件 64 位时间轴：
+然后：
 
 ```text
-extended_timestamp = overflow_count × 65536 + CCRx
-```
-
-代码同时处理了 **Capture 与 Update 几乎同时发生** 的边界情况，避免硬件已经溢出但软件溢出计数尚未来得及更新造成时间戳错误。
-
----
-
-## 频率测量：周期法 + 1 秒闸门法自动切换
-
-### 1. 低频 / 中频：TIM2 周期法
-
-TIM2_CH1 / PA0 捕获相邻两个上升沿：
-
-```text
-上升沿 1 → timestamp1
-上升沿 2 → timestamp2
-
 period_ticks = timestamp2 - timestamp1
+period_ns    = period_ticks × 1e9 / 72e6
+frequency    = 72e6 / period_ticks
 ```
 
-然后计算：
+为了保证“拔掉信号后不会长期保留旧结果”，软件实现了：
+
+- `frequency_valid`
+- `last_capture_tick_ms`
+- `FREQUENCY_TIMEOUT_MS = 1500 ms`
+
+即：超过 1.5 秒没有新的上升沿，周期法结果自动失效并清零。
+
+### 2）INTERVAL 模式
+
+TIM2_CH1 作为 **A**，TIM2_CH2 作为 **B**：
 
 ```text
-frequency_hz = 72,000,000 / period_ticks
-period_ns    = period_ticks × 1e9 / 72,000,000
-```
-
-周期越长，TIM2 能获得的 tick 越多，低频时分辨率越好。
-
-### 2. 高频：TIM1 + TIM4 硬件闸门法
-
-TIM1 配置为：
-
-```text
-Clock Source = ETR Mode 2
-Input        = PA12 / TIM1_ETR
-Slave Mode   = Gated
-Trigger      = ITR3
-PSC          = 0
-ARR          = 65535
-```
-
-TIM4 配置为：
-
-```text
-Timer Clock = 72 MHz
-PSC         = 7199
-ARR         = 9999
-One Pulse   = Single
-TRGO        = Enable
-```
-
-所以：
-
-```text
-72 MHz / (7199 + 1) = 10 kHz
-10000 tick = 1 s
-```
-
-工作过程：
-
-```text
-TIM1 CEN = 1
-TIM4 尚未启动
-↓
-TIM4 TRGO = LOW
-TIM1 Gate 关闭
-
-TIM4 启动 One Pulse
-↓
-TRGO = HIGH
-↓
-TIM1 Gate 打开
-↓
-PA12 每个有效脉冲推动 TIM1_CNT + 1
-
-1 秒后 TIM4 自动停止
-↓
-TRGO = LOW
-↓
-TIM1 Gate 关闭
-↓
-主循环读取 TIM1 CNT + overflow
-```
-
-因为窗口正好为 1 秒：
-
-```text
-gate_frequency_hz ≈ 1 秒内统计到的脉冲数
-```
-
-### 自动切换与迟滞
-
-理论上周期法和 1 秒闸门法的量化误差在约 8.5 kHz 附近交叉。
-
-当前实现采用迟滞区：
-
-```text
-周期法 → 闸门法：约 >= 10 kHz
-闸门法 → 周期法：约 <= 7 kHz
-```
-
-即：
-
-```text
-< 7 kHz          7~10 kHz             > 10 kHz
-周期法       保持当前测量方法            闸门法
-```
-
-避免临界点附近反复切换。
-
-另外，当 TIM2 周期法判断频率已经进入高频区域后，会立即关闭 CH1 捕获中断，避免 MHz 级输入产生海量 ISR 把 CPU 淹没。
-
-最终给上层使用的统一频率结果为：
-
-```c
-measured_frequency_hz
-```
-
-周期结果为：
-
-```c
-measured_period_ns
-```
-
----
-
-## A→B 时间间隔测量
-
-`INTERVAL` 模式下：
-
-```text
-PA0 / TIM2_CH1 = A
-PA1 / TIM2_CH2 = B
-```
-
-流程：
-
-```text
-A 上升沿
-↓
-记录 interval_start_timestamp
-↓
+A 到来
+ ↓
+记录 start timestamp
+ ↓
 等待 B
-↓
-B 上升沿
-↓
-记录 interval_end_timestamp
-↓
-interval_ticks = B - A
-↓
-换算 interval_ns
+ ↓
+B 到来
+ ↓
+interval = B - A
 ```
 
-当前代码同时维护：
+同时实现：
 
-```c
-interval_ns
-interval_waiting_ch2
-interval_valid
-```
+- `interval_valid`
+- `interval_waiting_ch2`
+- `INTERVAL_TIMEOUT_MS = 200 ms`
 
-分别表示：
+若 A 到来后 200 ms 内一直没有 B，则放弃本次 A，清空旧结果并重新同步。
 
-```text
-interval_ns          → 测量值
-interval_waiting_ch2 → 当前是否已经收到 A、正在等待 B
-interval_valid       → 当前结果是否可信
-```
+### 3）DUTY 模式：PWM Input
 
-题目 A→B 时间间隔上限为 100 ms，当前软件等待 B 的超时设置为：
+DUTY 模式下，TIM2 运行时动态改成 **PWM Input**：
 
-```text
-200 ms
-```
+- `CCR1`：一个完整周期的计数值
+- `CCR2`：高电平时间计数值
 
-如果 B 超时未到：
-
-```text
-放弃旧 A
-↓
-清除旧结果
-↓
-重新等待新的 A
-```
-
-CH2 ISR 内也会再次检查超时，避免“迟到的 B”错误匹配旧 A。
-
----
-
-## 占空比测量：TIM2 PWM Input
-
-`DUTY` 模式下，TIM2 会在运行时临时切换成 **PWM Input**。
-
-这里仍然只需要一根输入：
-
-```text
-PA0 / TIM2_TI1
-```
-
-但同一根 TI1 会同时映射到两个 Capture Channel：
-
-```text
-PA0 / TI1
-   │
-   ├── CH1 Direct TI1   → 上升沿 → CCR1 = 周期
-   │
-   └── CH2 Indirect TI1 → 下降沿 → CCR2 = 高电平时间
-```
-
-同时 TIM2 使用 Reset Mode：
-
-```text
-每个 TI1 上升沿
-↓
-锁存 CCR1
-↓
-CNT 自动归零
-↓
-重新开始下一周期
-```
-
-因此：
-
-```text
-CCR1 = 完整周期 tick
-CCR2 = 高电平 tick
-```
-
-占空比：
+关系：
 
 ```text
 Duty = CCR2 / CCR1 × 100%
 ```
 
-软件保存为千分数：
+这里不再让每个上升沿 / 下降沿都进入中断，而是由硬件持续锁存 `CCR1 / CCR2`，主循环轮询读取，因此高频 PWM 时不会制造海量 ISR。
 
-```c
+为了兼顾低频与高频，DUTY 模式会结合 `TIM1 + TIM4` 得到的粗频率自动调整 TIM2 的 PSC，使单周期尽量控制在约 `60000 tick` 左右，兼顾：
+
+- 低频不溢出
+- 高频保持尽量高的分辨率
+
+当前占空比结果以：
+
+```text
 measured_duty_permille
 ```
 
-例如：
+表示，即：
 
-```text
-500 → 50.0%
-333 → 33.3%
-725 → 72.5%
-```
-
-### 为什么 DUTY 不使用每边沿中断
-
-高频 PWM 如果每个上升沿、下降沿都触发 ISR，会迅速超过 F103 的 CPU 处理能力。
-
-因此 DUTY 模式中：
-
-```text
-CC1 interrupt = OFF
-CC2 interrupt = OFF
-```
-
-CCR1 / CCR2 由硬件持续更新，主循环只轮询最新 Capture 结果。
-
-### DUTY 的自动 PSC
-
-TIM2 只有 16 位，低频信号在 `PSC=0` 时周期会超过 65535 tick。
-
-当前 DUTY 模式会继续利用 TIM1 + TIM4 的 1 秒闸门得到一个粗频率，然后动态计算 TIM2 PSC，目标让一个周期尽量落在：
-
-```text
-<= 60000 tick
-```
-
-这样可以兼顾：
-
-- 低频不溢出
-- 高频尽量保持更高时间分辨率
-
-占空比测量也带有：
-
-```c
-duty_valid
-```
-
-和约 1500 ms 的无有效 Capture 超时处理。
-
-> 注意：F103 的 TIM2 时钟只有 72 MHz。到 MHz 级时，每周期可用 tick 数会明显下降，因此极高频端占空比精度最终仍受硬件时间分辨率限制，需要实测验证。
+- `500` → `50.0%`
+- `333` → `33.3%`
+- `725` → `72.5%`
 
 ---
 
-## 测量结果有效性与超时
+## TIM1 + TIM4：1 秒硬件闸门测频
 
-当前代码不再把“变量里有旧数值”等同于“现在仍然测量有效”。
+### TIM4：1 秒 Gate 发生器
 
-主要有效性状态包括：
+TIM4 当前用于 **One Pulse 硬件闸门**，通过 `TRGO Enable` 输出一段固定长度的高电平窗口。
 
-```c
-frequency_valid
-interval_valid
-duty_valid
-gate_frequency_valid
-```
-
-典型思想：
+作用可以理解为：
 
 ```text
-测量值
-+
-测量状态
-+
-超时
-+
-重新同步
+启动 TIM4
+ ↓
+TRGO 拉高
+ ↓
+保持 1 秒
+ ↓
+TRGO 拉低
+ ↓
+TIM4 自动停止
 ```
 
-例如频率周期法超过约 1500 ms 没有新的 CH1 上升沿，会清除旧结果并重新等待两个有效边沿。
+### TIM1：被 TIM4 Gate 控制的外部脉冲计数器
+
+TIM1 使用：
+
+- `ETR External Clock Mode 2`
+- `Gated Slave Mode`
+
+输入脉冲从 `PA12 / TIM1_ETR` 进入；只有在 TIM4 通过 `ITR3` 打开 Gate 的 1 秒窗口内，TIM1 才允许统计外部脉冲。
+
+最终：
+
+```text
+gate_frequency_hz = 1 秒内统计到的脉冲总数
+```
+
+并配合 `tim1_overflow_count` 实现 16 位计数器的软件扩展。
+
+### 为什么周期法和闸门法要共存
+
+- **低频**：周期长，TIM2 周期法分辨率高
+- **高频**：单周期 tick 太少，闸门法更合适
+
+因此项目实现了：
+
+```text
+低频 → TIM2 周期法
+高频 → TIM1 + TIM4 闸门法
+```
+
+并加了 **7 kHz ~ 10 kHz 迟滞区**，避免在临界点来回抖动。
+
+另外，当周期法判断频率已经进入高频区时，会立即关闭 `TIM2 CH1` 输入捕获中断，避免高频输入把 MCU 拖入“捕获中断风暴”。
 
 ---
 
-## 当前关键结果变量
+## 自动测量策略
 
-| 变量 | 作用 |
-| --- | --- |
-| `measured_frequency_hz` | 自动选择周期法 / 闸门法后的最终频率 |
-| `measured_period_ns` | 最终周期结果 |
-| `measured_duty_permille` | 占空比，0~1000 对应 0.0%~100.0% |
-| `interval_ns` | A→B 时间间隔 |
-| `frequency_valid` | TIM2 周期法结果是否有效 |
-| `duty_valid` | DUTY PWM Input 结果是否有效 |
-| `interval_valid` | A→B 结果是否有效 |
-| `gate_frequency_hz` | TIM1 + TIM4 1 秒闸门测频结果 |
-| `gate_ready` | TIM4 本轮 1 秒 One Pulse 是否结束 |
-| `tim1_overflow_count` | TIM1 16 位外部脉冲计数扩展 |
-| `tim2_overflow_count` | TIM2 16 位时间轴扩展 |
+FREQUENCY / PERIOD 模式内部使用的不是“固定一种算法”，而是自动策略：
+
+```text
+                输入信号
+                   │
+      ┌────────────┴────────────┐
+      ↓                         ↓
+低频 / 中低频               高频
+TIM2 周期法               TIM1 + TIM4 闸门法
+      │                         │
+      └────────────┬────────────┘
+                   ↓
+              软件策略层
+                   ↓
+     measured_frequency_hz / measured_period_ns
+```
+
+切换条件：
+
+- `period_ticks <= 7200` → 转闸门法（约 10 kHz）
+- `gate_frequency_hz <= 7000` → 转回周期法（约 7 kHz）
+
+这样形成 7~10 kHz 的迟滞区。
 
 ---
 
-## GitHub Actions：STM32 ARM 自动编译
+## 有效性与超时设计
 
-仓库已经加入：
+当前项目已经把“测量值”和“测量状态”明确区分开：
 
-```text
-.github/workflows/stm32-build.yml
-```
+| 功能 | 结果变量 | 有效性变量 | 超时行为 |
+| --- | --- | --- | --- |
+| 频率 / 周期 | `measured_frequency_hz` / `measured_period_ns` | `frequency_valid`、`gate_frequency_valid` | 无输入时自动失效 |
+| 占空比 | `measured_duty_permille` | `duty_valid` | 长时间无新 PWM 锁存则失效 |
+| 时间间隔 | `interval_ns` | `interval_valid` | A 等 B 超时则丢弃本次 A |
 
-CI 使用仓库现有的：
+这一步很重要，因为真正的仪器软件不能只保存“上次测出来多少”，还必须知道：
 
-```text
-CMake
-CMakePresets.json
-Ninja
-arm-none-eabi-gcc
-```
+> **这个值现在还能不能信。**
 
-自动执行：
+---
 
-```text
-push / PR
-↓
-安装 ARM GCC 工具链
-↓
-cmake --preset Debug
-↓
-cmake --build --preset Debug
-↓
-ARM 编译 + 链接
-↓
-arm-none-eabi-size
-↓
-生成并上传
-firmware.elf
-firmware.hex
-firmware.bin
-firmware.map
-```
+## GitHub Actions ARM 编译
 
-当前加入 DUTY 模式后的 CI 已成功通过。
+仓库已经加入最小可用的 STM32 固件 CI：
 
-最近一次成功构建资源占用：
+- ARM 交叉编译
+- 链接
+- `arm-none-eabi-size`
+- 生成 `.elf / .hex / .bin / .map`
+- 上传构建产物 Artifact
+
+当前 C8T6 资源占用（加入 DUTY 后的一次成功编译）：
 
 ```text
-RAM   : 2032 B / 20 KB ≈ 9.92%
+RAM   : 2032 B / 20 KB  ≈ 9.92%
 FLASH : 18164 B / 64 KB ≈ 27.72%
 ```
 
-这意味着后续每次修改 `firmware/**` 后，都可以让 GitHub Actions 自动充当 ARM 编译守门员。
+因此现在不只是“代码看起来像能编译”，而是每次提交都会经过真实的 `arm-none-eabi-gcc` 校验。
 
 ---
 
 ## 当前完成度
 
-### 已实现
+### 已完成（软件骨架）
 
-- TIM3 1 kHz / 50% PWM 测试信号源
-- TIM2 72 MHz 高分辨率时间轴
-- TIM2 周期法测频
-- TIM2 16 位溢出扩展
-- Capture / Update 边界处理
-- TIM1 ETR 外部脉冲计数
-- TIM1 软件溢出扩展
-- TIM4 1 秒 One Pulse 硬件闸门
-- TIM4 TRGO → TIM1 ITR3 → Gated Mode
+- TIM3 PWM 测试信号源
+- TIM2 72 MHz 周期法测频
+- TIM2 16 位溢出扩展时间戳
+- TIM1 + TIM4 1 秒硬件闸门测频
 - 周期法 / 闸门法自动切换
-- 7~10 kHz 迟滞区
-- 高频自动关闭 TIM2_CH1 捕获中断
-- 频率无信号超时
+- 高频时关闭 TIM2 CH1 捕获中断，避免 ISR 爆炸
 - 周期测量
-- A→B 双路时间间隔测量
-- A→B 有效性、超时和重新同步
-- DUTY 占空比模式
-- TIM2 PWM Input
-- DUTY 动态 PSC
-- DUTY 有效性与超时
-- 仪器模式框架
-- GitHub Actions ARM Debug 真编译
-- ELF / HEX / BIN / MAP 自动生成
+- A→B 时间间隔测量
+- `interval_valid` + 超时 + 重新同步
+- TIM2 PWM Input 占空比测量
+- DUTY 自动调整 PSC
+- FREQUENCY / PERIOD / DUTY / INTERVAL 仪器模式骨架
+- GitHub Actions ARM 交叉编译验证
 
-### 尚未完成 / 需要实测
+### 仍需完成 / 仍需实测
 
-- 开发板实测
-- 1 Hz ~ 10 MHz 全范围误差测试
-- 7~10 kHz 自动方法切换实测
-- TIM1 ETR 高频极限验证
-- 1 秒 Gate 实际误差验证
-- A→B 0.1 us ~ 100 ms 全范围验证
-- 占空比 1 Hz ~ 5 MHz、10%~90% 全范围验证
-- 极高频下 TIM2 时间量化误差评估
-- OLED / TFT 显示
-- 按键或菜单模式切换
-- Hz / kHz / MHz、ns / us / ms / s 自动单位显示
-- 正弦波输入的放大、比较、施密特整形和输入保护
-- 完整竞赛性能指标验证
+- 实板验证与误差测试
+- 各频段切换边界的真实表现
+- DUTY 在高频端的实际分辨率验证
+- OLED / TFT / LVGL 显示层
+- 按键 / 菜单 / 串口切换模式
+- 统一测量结果输出层
+- Hz / kHz / MHz、ns / us / ms 自动单位
+- 正弦波输入的模拟放大、比较和整形前端
+- 2015 F 题完整性能指标验证
+- 更高频率与更高灵敏度的发挥部分
 
 ---
 
-## 推荐硬件自测接线
+## 推荐测试接线
 
-使用 TIM3 自带测试 PWM 时，可先验证 1 kHz / 50%：
+### 1）频率 / 周期测试
+
+可以先用 TIM3 作为自测信号源：
 
 ```text
-TIM3 PA6
-   │
-   ├────> PA0  / TIM2_CH1
-   │
-   └────> PA12 / TIM1_ETR
+PA6 (TIM3 PWM)
+ ├─> PA0  (TIM2_CH1)
+ └─> PA12 (TIM1_ETR)
+```
+
+这样可以同时验证：
+
+- 周期法结果
+- 闸门法结果
+- 自动切换逻辑
+
+### 2）占空比测试
+
+```text
+PA6 (TIM3 PWM)
+ ├─> PA0  (TIM2_CH1 / PWM Input)
+ └─> PA12 (TIM1_ETR，可用于粗频率辅助调 PSC)
 ```
 
 预期：
 
 ```text
-Frequency ≈ 1000 Hz
-Period    ≈ 1 ms
-Duty      ≈ 50.0%
+frequency ≈ 1000 Hz
+duty      ≈ 50.0%
 ```
 
-A→B 时间间隔模式则需要两路独立数字输入：
+### 3）A→B 时间间隔测试
 
 ```text
-A → PA0 / TIM2_CH1
-B → PA1 / TIM2_CH2
+信号 A ──> PA0 (TIM2_CH1)
+信号 B ──> PA1 (TIM2_CH2)
 ```
+
+如果暂时没有双路信号源，也可以后续再用 PWM + 人工构造延时或双通道函数信号源验证。
 
 ---
 
-## 当前项目定位
+## 项目定位
 
 当前仓库更准确的定位是：
 
-> **围绕 2015 F 数字频率计展开的 STM32 定时器综合测量原型。**
+> **围绕 2015 F 数字频率计展开的 STM32 定时器学习工程 + 测量原型。**
 
-项目已经不再只是单个 Timer 的练习，而是在同一个工程里同时处理：
+它最大的价值不只是“最后测到一个数”，而是借这个项目真正把下面这些内容串起来：
 
-```text
-PWM
-Input Capture
-PWM Input
-External Clock
-One Pulse
-Master / Slave
-TRGO / ITR
-Gated Mode
-NVIC / ISR
-16 位溢出扩展
-超时与有效性
-自动测量策略
-GitHub Actions ARM CI
-```
+- 一个定时器内部怎么工作
+- 多个定时器之间如何协同
+- 测量方法为什么要按频段切换
+- 为什么结果必须区分 value / valid / timeout
+- 为什么实际仪器设计不能只停留在“会配外设”
 
-下一阶段重点将从“继续堆定时器功能”转向：**实板验证、显示层、硬件输入前端和完整性能测试**。
+---
+
+## 后续方向
+
+后续比较自然的推进顺序：
+
+1. 实板验证现有 4 种测量模式
+2. 做结果统一输出层
+3. 接 OLED / TFT 显示
+4. 接按键 / 菜单切换仪器模式
+5. 做自动单位显示
+6. 加模拟前端（放大 / 比较 / 整形）
+7. 对照 2015 F 题逐项做精度与性能验证
+
+如果后续继续往“完整电赛题作品”推进，那么真正决定上限的就不再只是 HAL 代码，而会逐步转向：
+
+- 输入整形前端
+- 基准时钟精度
+- 高频路径设计
+- 抗抖 / 抗干扰
+- 显示与交互完整度
+- 系统级工程实现
