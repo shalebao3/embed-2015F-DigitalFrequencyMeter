@@ -42,14 +42,18 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
-# Add sources to executable
+# Application modules: keep measurement algorithms out of CubeMX generated Core/Src/main.c.
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
+    App/Src/instrument.c
+    App/Src/frequency_meter.c
+    App/Src/duty_meter.c
+    App/Src/interval_meter.c
+    App/Src/measurement_hw.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined include paths
+    App/Inc
 )
 
 # Add project symbols (macros)
