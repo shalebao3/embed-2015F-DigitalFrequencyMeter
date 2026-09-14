@@ -70,13 +70,12 @@ static volatile uint8_t interval_waiting_ch2 = 0;      // 1=已经收到 A，等
 static volatile uint32_t frequency_hz = 0;             // 周期法计算得到的频率，单位 Hz
 static volatile uint64_t frequency_millihz = 0;        // mHz
 
-// TIM4
-static volatile uint32_t gate_frequency_hz = 0;      // TIM4 在 1 秒闸门内统计得到的频率，单位 Hz，等于“溢出次数 * 65536 + CNT”
-static volatile uint32_t tim4_overflow_count = 0;    // TIM4 的 16 位 CNT 溢出次数，用于扩展外部脉冲计数范围
+// TIM1：1 秒窗口内统计外部脉冲
+static volatile uint32_t gate_frequency_hz = 0;      // TIM1 在 1 秒闸门内统计得到的频率，单位 Hz，等于“溢出次数 * 65536 + CNT”
+static volatile uint32_t tim1_overflow_count = 0;    // TIM1 的 16 位 CNT 溢出次数，用于扩展外部脉冲计数范围
 
-// TIM1
-static volatile uint8_t gate_ready = 0;              // TIM1 的 1 秒闸门完成标志：1=本轮测量结果可以读取
-
+// TIM4：1 秒 One Pulse 硬件闸门
+static volatile uint8_t gate_ready = 0;               // TIM4 的 1 秒闸门完成标志：1=本轮测量结果可以读取
 
 /* USER CODE END PV */
 
@@ -553,19 +552,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM1)
   {
-    /* 1 秒测量窗口结束 */
-
-    /*
-     * __HAL_TIM_DISABLE(&htimX)
-     * 作用：清除定时器 CR1 寄存器中的 CEN 位，停止硬件计数。
-     * 参数：
-     *   &htim1 -> 停止 1 秒闸门计时。
-     *   &htim4 -> 停止外部脉冲计数，使这一轮结果冻结。
+    /* TIM1 负责统计外部脉冲；
+     * 每溢出一次代表又累计了 65536 个脉冲。
      */
-    __HAL_TIM_DISABLE(&htim1);
-    __HAL_TIM_DISABLE(&htim4);
-
-    gate_ready = 1;
+    tim1_overflow_count++;
   }
   else if (htim->Instance == TIM2)
   {
@@ -573,7 +563,19 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   }
   else if (htim->Instance == TIM4)
   {
-    tim4_overflow_count++;
+    /*
+     * TIM4 的 1 秒 One Pulse 已结束。
+     *
+     * 注意：
+     * 此时硬件已经自动：
+     *
+     * CEN -> 0
+     * TRGO -> LOW
+     *
+     * TIM1 的 Gate 已经关闭，
+     * 所以这里只负责通知主循环读取结果。
+     */
+    gate_ready = 1;
   }
 }
 
