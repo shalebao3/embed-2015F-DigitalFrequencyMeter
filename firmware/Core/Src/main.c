@@ -29,18 +29,26 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
+/*
+ * InstrumentMode：仪器对外提供的功能模式。
+ * 这个枚举回答的是“用户当前想测什么”，而不是“底层具体用哪种算法测”。
+ */
 typedef enum
 {
-  INSTRUMENT_MODE_FREQUENCY = 0,
-  INSTRUMENT_MODE_PERIOD,
-  INSTRUMENT_MODE_DUTY,
-  INSTRUMENT_MODE_INTERVAL
+  INSTRUMENT_MODE_FREQUENCY = 0, // 频率模式：最终输出频率，内部自动选择周期法或闸门法
+  INSTRUMENT_MODE_PERIOD,        // 周期模式：复用频率测量引擎，最终输出周期
+  INSTRUMENT_MODE_DUTY,          // 占空比模式：TIM2 切换为 PWM Input，测周期和高电平时间
+  INSTRUMENT_MODE_INTERVAL       // 时间间隔模式：TIM2_CH1=A、TIM2_CH2=B，测 A -> B 时间差
 } InstrumentMode;
 
+/*
+ * FrequencyMethod：FREQUENCY / PERIOD 模式内部使用的测量策略。
+ * 这个枚举回答的是“当前用什么方法测频率”。
+ */
 typedef enum
 {
-  FREQUENCY_METHOD_PERIOD = 0,
-  FREQUENCY_METHOD_GATE
+  FREQUENCY_METHOD_PERIOD = 0, // 周期法：TIM2 捕获相邻上升沿，低频时分辨率更高
+  FREQUENCY_METHOD_GATE        // 闸门法：TIM1 在 TIM4 的 1 秒 Gate 内数脉冲，高频时更合适
 } FrequencyMethod;
 
 /* USER CODE END PTD */
@@ -85,55 +93,55 @@ typedef enum
 
 /* USER CODE BEGIN PV */
 
-// 仪器功能模式
-static volatile InstrumentMode instrument_mode = INSTRUMENT_MODE_FREQUENCY;
-static volatile uint8_t instrument_mode_initialized = 0;
+// ==================== 仪器功能模式状态 ====================
+static volatile InstrumentMode instrument_mode = INSTRUMENT_MODE_FREQUENCY; // 当前用户功能模式：频率 / 周期 / 占空比 / A->B
+static volatile uint8_t instrument_mode_initialized = 0;                    // 0=尚未完成首次模式配置，1=已经配置过
 
-// TIM2：周期法 / 时间间隔共用的扩展时间轴
-static volatile uint64_t period_ticks = 0;
-static volatile uint64_t period_ns = 0;
-static volatile uint64_t timestamp1 = 0;
-static volatile uint64_t timestamp2 = 0;
-static volatile uint8_t capture_state = 0;
-static volatile uint32_t tim2_overflow_count = 0;
+// ==================== TIM2：周期法 / INTERVAL 共用扩展时间轴 ====================
+static volatile uint64_t period_ticks = 0;         // 周期法测得的一个完整周期，单位：TIM2 tick
+static volatile uint64_t period_ns = 0;            // period_ticks 换算后的周期，单位：ns
+static volatile uint64_t timestamp1 = 0;           // 周期法上一次 CH1 捕获的 64 位扩展时间戳
+static volatile uint64_t timestamp2 = 0;           // 周期法当前 CH1 捕获的 64 位扩展时间戳
+static volatile uint8_t capture_state = 0;         // 周期法捕获状态：0=等待第一沿，1=已经有上一时间戳
+static volatile uint32_t tim2_overflow_count = 0;  // TIM2 16 位 CNT 的软件溢出次数，用于扩展为长时间轴
 
-// A -> B 时间间隔
-static volatile uint64_t interval_start_timestamp = 0;
-static volatile uint64_t interval_end_timestamp = 0;
-static volatile uint64_t interval_ticks = 0;
-static volatile uint64_t interval_ns = 0;
-static volatile uint8_t interval_waiting_ch2 = 0;
-static volatile uint32_t interval_start_tick_ms = 0;
-static volatile uint8_t interval_valid = 0;
+// ==================== A -> B 时间间隔测量状态 ====================
+static volatile uint64_t interval_start_timestamp = 0; // A(CH1) 到达时的 64 位扩展时间戳
+static volatile uint64_t interval_end_timestamp = 0;   // B(CH2) 到达时的 64 位扩展时间戳
+static volatile uint64_t interval_ticks = 0;           // B-A 的时间差，单位：TIM2 tick
+static volatile uint64_t interval_ns = 0;              // interval_ticks 换算后的 A->B 时间间隔，单位：ns
+static volatile uint8_t interval_waiting_ch2 = 0;      // 1=已经收到 A，当前正在等待 B；0=等待新的 A
+static volatile uint32_t interval_start_tick_ms = 0;   // A 到达时的 HAL_GetTick()，用于判断等待 B 是否超时
+static volatile uint8_t interval_valid = 0;            // 1=当前 interval_ns 来自完整且未超时的 A->B 配对
 
-// 周期法频率
-static volatile uint32_t frequency_hz = 0;
-static volatile uint64_t frequency_millihz = 0;
-static volatile uint32_t last_capture_tick_ms = 0;
-static volatile uint8_t frequency_valid = 0;
-static volatile uint8_t period_requests_gate = 0;
+// ==================== TIM2 周期法得到的频率结果 ====================
+static volatile uint32_t frequency_hz = 0;          // 周期法频率结果，单位：Hz（整数）
+static volatile uint64_t frequency_millihz = 0;     // 周期法频率结果，单位：mHz，用于保留低频小数精度
+static volatile uint32_t last_capture_tick_ms = 0;  // 最近一次 CH1 上升沿的 HAL tick，用于无信号超时判断
+static volatile uint8_t frequency_valid = 0;        // 1=周期法当前 frequency/period 结果仍然有效
+static volatile uint8_t period_requests_gate = 0;   // 1=周期已经短到应从 PERIOD_METHOD 切换到 GATE_METHOD
 
-// FREQUENCY / PERIOD 共用的自动测量策略
-static volatile FrequencyMethod frequency_method = FREQUENCY_METHOD_PERIOD;
-static volatile uint32_t measured_frequency_hz = 0;
-static volatile uint64_t measured_period_ns = 0;
+// ==================== FREQUENCY / PERIOD 共用自动测量策略 ====================
+static volatile FrequencyMethod frequency_method = FREQUENCY_METHOD_PERIOD; // 当前内部测频策略：周期法或闸门法
+static volatile uint32_t measured_frequency_hz = 0;                         // 对上层提供的最终频率结果，单位：Hz
+static volatile uint64_t measured_period_ns = 0;                            // 对上层提供的最终周期结果，单位：ns
 
-// DUTY：TIM2 PWM Input 硬件锁存结果
-static volatile uint32_t duty_period_ticks = 0;
-static volatile uint32_t duty_high_ticks = 0;
-static volatile uint16_t measured_duty_permille = 0; // 0~1000，对应 0.0%~100.0%
-static volatile uint16_t duty_prescaler = DUTY_DEFAULT_PRESCALER;
-static volatile uint32_t last_duty_capture_tick_ms = 0;
-static volatile uint8_t duty_capture_synced = 0;
-static volatile uint8_t duty_valid = 0;
+// ==================== DUTY：TIM2 PWM Input 硬件锁存结果 ====================
+static volatile uint32_t duty_period_ticks = 0;                 // PWM Input 的 CCR1 周期值，单位：当前 TIM2 tick
+static volatile uint32_t duty_high_ticks = 0;                   // PWM Input 的 CCR2 高电平时间，单位：当前 TIM2 tick
+static volatile uint16_t measured_duty_permille = 0;            // 最终占空比千分数：0~1000 对应 0.0%~100.0%
+static volatile uint16_t duty_prescaler = DUTY_DEFAULT_PRESCALER; // DUTY 模式当前 TIM2 PSC，用于自动量程
+static volatile uint32_t last_duty_capture_tick_ms = 0;         // 最近一次有效 PWM Input 结果的 HAL tick，用于超时失效
+static volatile uint8_t duty_capture_synced = 0;                // 0=刚进入/重配 PWM Input 尚未同步完整周期，1=已同步
+static volatile uint8_t duty_valid = 0;                         // 1=当前 duty_period/high/permille 是可信结果
 
-// TIM1：1 秒硬件闸门内统计外部脉冲
-static volatile uint32_t gate_frequency_hz = 0;
-static volatile uint32_t tim1_overflow_count = 0;
-static volatile uint8_t gate_frequency_valid = 0;
+// ==================== TIM1：1 秒硬件闸门内统计外部脉冲 ====================
+static volatile uint32_t gate_frequency_hz = 0;   // TIM1 在 1 秒 Gate 内的总脉冲数；1 秒窗下即约等于 Hz
+static volatile uint32_t tim1_overflow_count = 0; // TIM1 16 位外部计数器溢出次数，用于恢复完整脉冲总数
+static volatile uint8_t gate_frequency_valid = 0; // 1=至少已经完成一轮有效的 1 秒闸门测量
 
-// TIM4：1 秒 One Pulse 闸门
-static volatile uint8_t gate_ready = 0;
+// ==================== TIM4：1 秒 One Pulse 硬件闸门 ====================
+static volatile uint8_t gate_ready = 0; // 1=TIM4 本轮 One Pulse 已结束，主循环可以读取 TIM1 快照
 
 /* USER CODE END PV */
 
@@ -292,9 +300,9 @@ static void TIM2_ConfigureDutyCapture(uint16_t prescaler)
  */
 static uint16_t Duty_CalculatePrescaler(uint32_t gate_frequency)
 {
-  uint32_t frequency_lower_bound;
-  uint64_t denominator;
-  uint64_t divider;
+  uint32_t frequency_lower_bound; // 对 gate_frequency 做 -1 后得到的保守频率下界，防止低估所需 PSC
+  uint64_t denominator;           // 计算目标分频系数时的分母：频率下界 × 目标周期 tick
+  uint64_t divider;               // 实际分频系数 PSC+1，最后会转换回寄存器中的 PSC
 
   if (gate_frequency == 0U)
   {
@@ -350,8 +358,8 @@ static void Duty_ApplyPrescaler(uint16_t prescaler)
 /* 主循环轮询 PWM Input 的 CCR，不使用输入捕获中断。 */
 static void Duty_ProcessCapture(void)
 {
-  uint32_t period_capture;
-  uint32_t high_capture;
+  uint32_t period_capture; // 本次从 CCR1 读取到的完整 PWM 周期 tick
+  uint32_t high_capture;   // 本次从 CCR2 读取到的高电平时间 tick
 
   /* 必须至少同时看到一次周期捕获和一次下降沿捕获。 */
   if ((__HAL_TIM_GET_FLAG(&htim2, TIM_FLAG_CC1) == RESET) ||
@@ -410,7 +418,7 @@ static void Duty_ProcessCapture(void)
  */
 static void Instrument_SetMode(InstrumentMode new_mode)
 {
-  uint32_t frequency_hint = measured_frequency_hz;
+  uint32_t frequency_hint = measured_frequency_hz; // 切入 DUTY 前保留上一频率结果，用于第一次选择合适的 TIM2 PSC
 
   if (instrument_mode_initialized && (new_mode == instrument_mode))
   {
@@ -665,8 +673,8 @@ int main(void)
     {
       HAL_NVIC_DisableIRQ(TIM1_UP_IRQn);
 
-      uint32_t overflow_snapshot = tim1_overflow_count;
-      uint32_t counter_snapshot = __HAL_TIM_GET_COUNTER(&htim1);
+      uint32_t overflow_snapshot = tim1_overflow_count;                // 读取快照时已经由 ISR 记录的 TIM1 溢出次数
+      uint32_t counter_snapshot = __HAL_TIM_GET_COUNTER(&htim1);       // Gate 结束后 TIM1 当前 16 位 CNT 快照
 
       if (__HAL_TIM_GET_FLAG(&htim1, TIM_FLAG_UPDATE) != RESET)
       {
@@ -701,7 +709,7 @@ int main(void)
       }
       else if (instrument_mode == INSTRUMENT_MODE_DUTY)
       {
-        uint16_t new_prescaler = Duty_CalculatePrescaler(gate_frequency_hz);
+        uint16_t new_prescaler = Duty_CalculatePrescaler(gate_frequency_hz); // 根据本轮粗频率计算 DUTY 下一轮应使用的 TIM2 PSC
 
         measured_frequency_hz = gate_frequency_hz;
         measured_period_ns = (gate_frequency_hz != 0U)
@@ -826,9 +834,9 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
   if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
   {
     uint32_t capture =
-        HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+        HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1); // 本次 CH1 边沿到来时硬件锁存在 CCR1 中的 16 位 CNT
 
-    uint32_t overflow_snapshot = tim2_overflow_count;
+    uint32_t overflow_snapshot = tim2_overflow_count; // 与本次 CCR1 配对的软件溢出次数快照
 
     if ((__HAL_TIM_GET_FLAG(htim, TIM_FLAG_UPDATE) != RESET) &&
         (capture < 32768U))
@@ -837,7 +845,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
     }
 
     uint64_t current_timestamp =
-        (uint64_t)overflow_snapshot * 65536ULL + capture;
+        (uint64_t)overflow_snapshot * 65536ULL + capture; // 将 overflow + CCR1 合成为本次 CH1 的 64 位扩展时间戳
 
     if (instrument_mode == INSTRUMENT_MODE_INTERVAL)
     {
@@ -847,7 +855,6 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
         interval_ticks = 0;
         interval_ns = 0;
         interval_end_timestamp = 0;
-
         interval_start_timestamp = current_timestamp;
         interval_start_tick_ms = HAL_GetTick();
         interval_waiting_ch2 = 1U;
@@ -906,9 +913,9 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
     }
 
     uint32_t capture =
-        HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2);
+        HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2); // 本次 B(CH2) 上升沿到来时 CCR2 锁存的 16 位 CNT
 
-    uint32_t overflow_snapshot = tim2_overflow_count;
+    uint32_t overflow_snapshot = tim2_overflow_count; // 与本次 CCR2 配对的软件溢出次数快照
 
     if ((__HAL_TIM_GET_FLAG(htim, TIM_FLAG_UPDATE) != RESET) &&
         (capture < 32768U))
@@ -917,7 +924,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
     }
 
     uint64_t current_timestamp =
-        (uint64_t)overflow_snapshot * 65536ULL + capture;
+        (uint64_t)overflow_snapshot * 65536ULL + capture; // 将 overflow + CCR2 合成为 B 的 64 位扩展时间戳
 
     if (interval_waiting_ch2 == 1U)
     {
