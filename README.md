@@ -129,37 +129,37 @@ INTERVAL
 
 ```mermaid
 flowchart LR
-    SIG[被测输入信号]
-    T3[TIM3\nPWM测试信号源\nPA6]
+    SIG["被测输入信号"]
+    T3["TIM3 / PWM测试信号源 / PA6"]
 
-    subgraph FREQ[频率 / 周期测量链]
-      T2A[TIM2\n周期法\nInput Capture CH1\nPA0]
-      T1[TIM1\n外部脉冲计数\nETR + Gated\nPA12]
-      T4[TIM4\n1 s One Pulse Gate\nTRGO -> ITR3]
+    subgraph FREQ[频率周期测量链]
+      T2A["TIM2 / 周期法 / Input Capture CH1 / PA0"]
+      T1["TIM1 / 外部脉冲计数 / ETR + Gated / PA12"]
+      T4["TIM4 / 1 s One Pulse Gate / TRGO -> ITR3"]
     end
 
     subgraph DUTY[占空比测量链]
-      T2D[TIM2\nPWM Input\nCCR1 = 周期\nCCR2 = 高电平]
+      T2D["TIM2 / PWM Input / CCR1=周期 / CCR2=高电平"]
     end
 
-    subgraph INTERVAL[A→B 时间间隔测量链]
-      T2I[TIM2\nCH1 = A(PA0)\nCH2 = B(PA1)]
+    subgraph INTERVAL[AB时间间隔测量链]
+      T2I["TIM2 / CH1=A / PA0 / CH2=B / PA1"]
     end
 
-    STRAT[软件策略层\n模式切换 / 自动量程 / 有效性]
-    OUT[测量结果\nfrequency / period / duty / interval]
+    STRAT["软件策略层 / 模式切换 / 自动量程 / 有效性"]
+    OUT["测量结果 / frequency / period / duty / interval"]
 
     T3 -->|测试方波| T2A
     T3 -->|测试方波| T1
     T3 -->|测试方波| T2D
-    T3 -->|可作 A 或 B 测试信号| T2I
+    T3 -->|可作A或B测试信号| T2I
 
     SIG --> T2A
     SIG --> T1
     SIG --> T2D
     SIG --> T2I
 
-    T4 -->|TRGO / ITR3 打开 1 秒闸门| T1
+    T4 -->|TRGO / ITR3 / 1秒闸门| T1
 
     T2A --> STRAT
     T1 --> STRAT
