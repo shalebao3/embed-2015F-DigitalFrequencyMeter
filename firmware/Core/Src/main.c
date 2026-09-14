@@ -299,10 +299,8 @@ int main(void)
     /*
      * PERIOD -> GATE：
      * 周期法已经判断 period_ticks <= 7200（约 >= 10 kHz）时，
-     * 关闭 TIM2_CC1 捕获中断，避免高频输入产生海量 ISR。
-     *
-     * 注意这里只关闭 CC1 中断源，不关闭 TIM2：
-     * TIM2 的基本计数、Update 中断以及 CH2 仍然保持工作。
+     * CC1 中断已经在捕获 ISR 内立即关闭，避免更高频输入继续打断 CPU。
+     * 主循环这里只负责完成软件测量模式切换和状态清理。
      */
     if ((frequency_method == FREQUENCY_METHOD_PERIOD) && period_requests_gate)
     {
@@ -561,12 +559,15 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
         frequency_valid = 1;
 
         /*
-         * 周期短到 7200 tick 或更小时，请求主循环切换到闸门法。
-         * 这里只置标志，不在 ISR 里直接修改中断配置。
+         * 周期短到 7200 tick 或更小时，说明应该立即转入闸门法。
+         * 如果输入突然跳到 MHz 量级，等待主循环再关闭 CC1 可能来不及，
+         * 所以在当前捕获 ISR 内先关闭 CC1 中断源，阻止后续边沿继续打断 CPU。
+         * 主循环随后根据 period_requests_gate 完成软件状态切换。
          */
         if (period_ticks <= PERIOD_TO_GATE_TICKS)
         {
           period_requests_gate = 1;
+          __HAL_TIM_DISABLE_IT(htim, TIM_IT_CC1);
         }
       }
 
