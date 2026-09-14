@@ -40,6 +40,12 @@
 /* 1 秒 = 1,000,000,000 ns */
 #define NANOSECONDS_PER_SECOND 1000000000ULL
 
+/*
+ * 题目最低测量频率为 1 Hz，对应周期约 1000 ms。
+ * 1500 ms 超时既给 1 Hz 留出余量，又能避免输入断开后长期保留旧结果。
+ */
+#define FREQUENCY_TIMEOUT_MS 1500U
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -69,6 +75,8 @@ static volatile uint64_t interval_ns = 0;              // A → B 时间间隔�
 static volatile uint8_t interval_waiting_ch2 = 0;      // 1=已经收到 A，等待 B
 static volatile uint32_t frequency_hz = 0;             // 周期法计算得到的频率，单位 Hz
 static volatile uint64_t frequency_millihz = 0;        // mHz
+static volatile uint32_t last_capture_tick_ms = 0;     // 最近一次 TIM2_CH1 上升沿对应的 HAL tick
+static volatile uint8_t frequency_valid = 0;           // 1=周期法当前频率结果仍然有效
 
 // TIM1：1 秒窗口内统计外部脉冲
 static volatile uint32_t gate_frequency_hz = 0;      // TIM1 在 1 秒闸门内统计得到的频率，单位 Hz，等于“溢出次数 * 65536 + CNT”
@@ -229,6 +237,38 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
+    /*
+     * 周期法频率结果超时检测。
+     *
+     * frequency_valid 只有在已经获得两个有效 CH1 上升沿并算出周期后才会置 1。
+     * 如果超过 FREQUENCY_TIMEOUT_MS 没有新的 CH1 上升沿，说明输入可能已经停止，
+     * 此时清除旧结果并重置 capture_state，下一次必须重新捕获两个边沿。
+     */
+    if (frequency_valid &&
+        ((uint32_t)(HAL_GetTick() - last_capture_tick_ms) > FREQUENCY_TIMEOUT_MS))
+    {
+      /*
+       * TIM2 捕获中断可能与主循环超时判断同时发生。
+       * 暂时关闭 TIM2 IRQ 后再复查一次，避免刚到的新边沿被误判为超时。
+       */
+      HAL_NVIC_DisableIRQ(TIM2_IRQn);
+
+      if (frequency_valid &&
+          ((uint32_t)(HAL_GetTick() - last_capture_tick_ms) > FREQUENCY_TIMEOUT_MS))
+      {
+        frequency_valid = 0;
+        frequency_hz = 0;
+        frequency_millihz = 0;
+        period_ticks = 0;
+        period_ns = 0;
+        timestamp1 = 0;
+        timestamp2 = 0;
+        capture_state = 0;
+      }
+
+      HAL_NVIC_EnableIRQ(TIM2_IRQn);
+    }
+
     if (gate_ready)
     {
       /* TIM4 已经关闭 Gate，此时 TIM1 不再接收外部脉冲 */
@@ -375,6 +415,9 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
     uint64_t current_timestamp =
         (uint64_t)overflow_snapshot * 65536ULL + capture;
 
+    /* 记录最近一次 CH1 上升沿，用于主循环判断周期法结果是否超时。 */
+    last_capture_tick_ms = HAL_GetTick();
+
     /* ---------- 原来的 CH1 周期法测频 ---------- */
     if (capture_state == 0)
     {
@@ -393,7 +436,6 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
             (TIM2_COUNTER_HZ + period_ticks / 2ULL) /
             period_ticks;
 
-        
         frequency_millihz =
             (TIM2_COUNTER_HZ * 1000ULL +
              period_ticks / 2ULL) /
@@ -403,6 +445,9 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
             (period_ticks * NANOSECONDS_PER_SECOND +
              TIM2_COUNTER_HZ / 2ULL) /
             TIM2_COUNTER_HZ;
+
+        /* 已经获得完整周期，本次周期法频率结果有效。 */
+        frequency_valid = 1;
       }
       /* 当前边沿成为下一次测量的“上一次边沿” */
       timestamp1 = timestamp2;
@@ -542,7 +587,7 @@ void Error_Handler(void)
   * @brief  Reports the name of the source file and the source line number
   *         where the assert_param error has occurred.
   * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
+  * @param  line: source line number
   * @retval None
   */
 void assert_failed(uint8_t *file, uint32_t line)
