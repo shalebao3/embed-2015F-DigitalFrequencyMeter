@@ -150,6 +150,19 @@ int main(void)
   }
 
   /*
+   * HAL_TIM_Base_Start_IT(&htim4)
+   * 作用：启动 TIM4 基本计数，并使能 TIM4 Update 中断。
+   * 参数：
+   *   &htim4 -> TIM4 的 HAL 句柄地址。
+   * 当前项目用途：TIM4 工作在 External Clock Mode 1，PB6 每来一个有效脉冲就让 CNT +1；
+   *             CNT 溢出时通过中断累计 tim4_overflow_count。
+   */
+  if (HAL_TIM_Base_Start_IT(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /*
    * HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1)
    * 作用：启动 TIM2 通道 1 的 Input Capture（输入捕获）并开启捕获中断。
    * 参数：
@@ -186,34 +199,37 @@ int main(void)
     Error_Handler();
   }
 
-  /* PWM 已经开始，再准备第一次硬件闸门测量。 */
-  tim1_overflow_count = 0;
+  /* PWM 已经开始，再开启第一次测量窗口 */
+  tim4_overflow_count = 0;
 
   /*
-   * TIM1 是外部脉冲计数器：
-   * PA12 / TIM1_ETR 提供 External Clock Mode 2 时钟，
-   * TIM4_TRGO 通过 ITR3 + Gated Mode 决定 TIM1 是否允许计数。
+   * __HAL_TIM_SET_COUNTER(&htim4, 0)
+   * 作用：直接把 TIM4 的 CNT 寄存器写成 0。
+   * 参数：
+   *   &htim4 -> TIM4 句柄地址。
+   *   0      -> 要写入 CNT 的值。
+   * 当前项目用途：让第一轮闸门计数从 0 个脉冲开始。
+   */
+  __HAL_TIM_SET_COUNTER(&htim4, 0);
+
+  /*
+   * __HAL_TIM_SET_COUNTER(&htim1, 0)
+   * 作用：把 TIM1 的 CNT 清零。
+   * 参数：
+   *   &htim1 -> TIM1 句柄地址。
+   *   0      -> CNT 初始值。
+   * 当前项目用途：让 1 秒闸门从 t=0 开始计时。
    */
   __HAL_TIM_SET_COUNTER(&htim1, 0);
-  __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
-  HAL_NVIC_ClearPendingIRQ(TIM1_UP_IRQn);
-
-  if (HAL_TIM_Base_Start_IT(&htim1) != HAL_OK)
-  {
-    Error_Handler();
-  }
 
   /*
-   * TIM1 此时已经准备好，但 TIM4 尚未启动：
-   * TIM4 TRGO = LOW，因此 TIM1 Gate 仍关闭，不会统计 PA12 的输入脉冲。
+   * HAL_TIM_Base_Start_IT(&htim1)
+   * 作用：启动 TIM1 基本计数，并开启 TIM1 Update 中断。
+   * 参数：
+   *   &htim1 -> TIM1 的 HAL 句柄地址。
+   * 当前项目用途：TIM1 每计满 1 秒产生一次 Update Event，作为门控测频的时间基准。
    */
-
-  /* TIM4：准备并启动 1 秒 One Pulse 硬件闸门。 */
-  __HAL_TIM_SET_COUNTER(&htim4, 0);
-  __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
-  HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
-
-  if (HAL_TIM_Base_Start_IT(&htim4) != HAL_OK)
+  if (HAL_TIM_Base_Start_IT(&htim1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -227,38 +243,21 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
     if (gate_ready)
     {
-      /*
-       * HAL_NVIC_DisableIRQ(TIM4_IRQn)
-       * 作用：暂时禁止 NVIC 响应 TIM4 的中断请求。
-       * 参数：
-       *   TIM4_IRQn -> TIM4 在 NVIC 中对应的中断号。
-       * 当前项目用途：读取 TIM4 软件溢出次数和 CNT 时，避免 TIM4 ISR 同时修改数据。
-       */
-      HAL_NVIC_DisableIRQ(TIM4_IRQn);
+      /* TIM4 已经关闭 Gate，此时 TIM1 不再接收外部脉冲 */
 
-      uint32_t overflow_snapshot = tim4_overflow_count;       // 拍下 TIM4 当前已经记录的软件溢出次数
-      uint32_t counter_snapshot =                             // 拍下 1 秒闸门结束时 TIM4 当前 CNT 的剩余脉冲数
-          /*
-           * __HAL_TIM_GET_COUNTER(&htim4)
-           * 作用：读取 TIM4 当前 CNT 寄存器值。
-           * 参数：
-           *   &htim4 -> TIM4 句柄地址。
-           * 返回值：当前 TIM4_CNT 的值。
-           */
-          __HAL_TIM_GET_COUNTER(&htim4);
+      HAL_NVIC_DisableIRQ(TIM1_UP_IRQn);
+
+      uint32_t overflow_snapshot = tim1_overflow_count;
+      uint32_t counter_snapshot = __HAL_TIM_GET_COUNTER(&htim1);
 
       /*
-       * __HAL_TIM_GET_FLAG(&htim4, TIM_FLAG_UPDATE)
-       * 作用：检查 TIM4 的 Update Flag（UIF）是否已经置位。
-       * 参数：
-       *   &htim4          -> TIM4 句柄地址。
-       *   TIM_FLAG_UPDATE -> 要检查的标志位，这里就是更新/溢出标志 UIF。
-       * 返回值：RESET 表示未置位；非 RESET 表示该标志已经置位。
-       * 当前项目用途：如果已经发生溢出，但 ISR 还没来得及执行，就手动把这次溢出补进快照。
+       * 极端情况：
+       * TIM1 已经溢出，但 Update ISR 还没来得及执行。
        */
-      if (__HAL_TIM_GET_FLAG(&htim4, TIM_FLAG_UPDATE) != RESET)
+      if (__HAL_TIM_GET_FLAG(&htim1, TIM_FLAG_UPDATE) != RESET)
       {
         overflow_snapshot++;
       }
@@ -266,56 +265,30 @@ int main(void)
       gate_frequency_hz =
           overflow_snapshot * 65536UL + counter_snapshot;
 
-      /* 清理下一轮 */
-      tim4_overflow_count = 0;
+      /* 准备下一轮 */
+      tim1_overflow_count = 0;
 
-      /*
-       * __HAL_TIM_SET_COUNTER(..., 0)
-       * 作用：分别把 TIM4、TIM1 的 CNT 清零，为下一轮 1 秒测量重新从 0 开始。
-       */
-      __HAL_TIM_SET_COUNTER(&htim4, 0);
       __HAL_TIM_SET_COUNTER(&htim1, 0);
 
-      /*
-       * __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE)
-       * 作用：清除 TIM4 的 Update Flag（UIF）。
-       * 参数：
-       *   &htim4          -> TIM4 句柄地址。
-       *   TIM_FLAG_UPDATE -> 要清除的更新/溢出标志。
-       * 当前项目用途：避免上一轮遗留的 UIF 干扰下一轮测量。
-       */
-      __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
-
-      /*
-       * HAL_NVIC_ClearPendingIRQ(TIM4_IRQn)
-       * 作用：清除 NVIC 中已经挂起（Pending）的 TIM4 中断请求。
-       * 参数：
-       *   TIM4_IRQn -> TIM4 的 NVIC 中断号。
-       * 注意：它清的是 NVIC 的 Pending 状态，不是 TIM4 外设里的 UIF。
-       */
-      HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
+      __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+      HAL_NVIC_ClearPendingIRQ(TIM1_UP_IRQn);
 
       gate_ready = 0;
 
-      /*
-       * HAL_NVIC_EnableIRQ(TIM4_IRQn)
-       * 作用：重新允许 NVIC 响应 TIM4 中断。
-       * 参数：
-       *   TIM4_IRQn -> TIM4 的 NVIC 中断号。
-       */
-      HAL_NVIC_EnableIRQ(TIM4_IRQn);
+      HAL_NVIC_EnableIRQ(TIM1_UP_IRQn);
 
       /*
-       * __HAL_TIM_ENABLE(&htimX)
-       * 作用：直接设置对应定时器 CR1 寄存器中的 CEN 位，使计数器继续运行。
-       * 参数：
-       *   &htim4 -> 恢复 TIM4 外部脉冲计数。
-       *   &htim1 -> 恢复 TIM1 的 1 秒闸门计时。
-       * 注意：第一次已经通过 HAL_TIM_Base_Start_IT() 开启过中断，
-       *      后续这里只恢复硬件计数，不需要再次调用 Start_IT。
+       * TIM1 不需要重新启动：
+       * 它的 CEN 仍然开着，只是由于 TIM4 TRGO=LOW，
+       * Gated Mode 暂停了计数。
+       *
+       * 这里只需要重新启动 TIM4 One Pulse。
        */
+      __HAL_TIM_SET_COUNTER(&htim4, 0);
+      __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
+      HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
+
       __HAL_TIM_ENABLE(&htim4);
-      __HAL_TIM_ENABLE(&htim1);
     }
   }
   /* USER CODE END 3 */
@@ -528,9 +501,9 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
  * 参数：
  *   htim -> 发生 Update Event 的定时器句柄指针。
  * 当前项目中三个来源：
- *   TIM1 -> 16 位外部脉冲计数器溢出。
+ *   TIM1 -> 1 秒闸门结束。
  *   TIM2 -> 16 位时间计数器溢出。
- *   TIM4 -> 1 秒 One Pulse 硬件闸门结束。
+ *   TIM4 -> 16 位外部脉冲计数器溢出。
  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
@@ -581,7 +554,7 @@ void Error_Handler(void)
 }
 #ifdef USE_FULL_ASSERT
 /**
-  * @brief  Reports the name of the source file name and the source line number
+  * @brief  Reports the name of the source file and the source line number
   *         where the assert_param error has occurred.
   * @param  file: pointer to the source file name
   * @param  line: assert_param error line source number
