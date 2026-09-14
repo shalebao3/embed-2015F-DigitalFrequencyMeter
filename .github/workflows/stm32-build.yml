@@ -1,0 +1,94 @@
+name: STM32 Firmware Build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "firmware/**"
+      - ".github/workflows/stm32-build.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "firmware/**"
+      - ".github/workflows/stm32-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stm32-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ARM Debug Build
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: firmware
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi \
+            binutils-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            ninja-build
+
+      - name: Show tool versions
+        run: |
+          arm-none-eabi-gcc --version
+          cmake --version
+          ninja --version
+
+      - name: Configure Debug build
+        run: cmake --preset Debug
+
+      - name: Build firmware
+        run: cmake --build --preset Debug --parallel
+
+      - name: Show firmware size and create images
+        run: |
+          set -euo pipefail
+
+          ELF="$(find build/Debug -type f -name 'firmware.elf' -print -quit)"
+          if [ -z "$ELF" ]; then
+            echo "firmware.elf was not generated"
+            exit 1
+          fi
+
+          echo "ELF: $ELF"
+          arm-none-eabi-size "$ELF"
+
+          mkdir -p ci-artifacts
+          cp "$ELF" ci-artifacts/firmware.elf
+          arm-none-eabi-objcopy -O ihex "$ELF" ci-artifacts/firmware.hex
+          arm-none-eabi-objcopy -O binary "$ELF" ci-artifacts/firmware.bin
+
+          MAP="$(find build/Debug -type f -name 'firmware.map' -print -quit)"
+          if [ -n "$MAP" ]; then
+            cp "$MAP" ci-artifacts/firmware.map
+          fi
+
+          ls -lh ci-artifacts
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stm32f103-debug-${{ github.sha }}
+          path: |
+            firmware/ci-artifacts/firmware.elf
+            firmware/ci-artifacts/firmware.hex
+            firmware/ci-artifacts/firmware.bin
+            firmware/ci-artifacts/firmware.map
+          if-no-files-found: error
+          retention-days: 14
