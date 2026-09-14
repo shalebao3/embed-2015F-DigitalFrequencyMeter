@@ -150,19 +150,6 @@ int main(void)
   }
 
   /*
-   * HAL_TIM_Base_Start_IT(&htim4)
-   * 作用：启动 TIM4 基本计数，并使能 TIM4 Update 中断。
-   * 参数：
-   *   &htim4 -> TIM4 的 HAL 句柄地址。
-   * 当前项目用途：TIM4 工作在 External Clock Mode 1，PB6 每来一个有效脉冲就让 CNT +1；
-   *             CNT 溢出时通过中断累计 tim4_overflow_count。
-   */
-  if (HAL_TIM_Base_Start_IT(&htim4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /*
    * HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1)
    * 作用：启动 TIM2 通道 1 的 Input Capture（输入捕获）并开启捕获中断。
    * 参数：
@@ -199,37 +186,35 @@ int main(void)
     Error_Handler();
   }
 
-  /* PWM 已经开始，再开启第一次测量窗口 */
-  tim4_overflow_count = 0;
+  /* PWM 已经开始，再准备第一次硬件闸门测量。 */
+  tim1_overflow_count = 0;
 
   /*
-   * __HAL_TIM_SET_COUNTER(&htim4, 0)
-   * 作用：直接把 TIM4 的 CNT 寄存器写成 0。
-   * 参数：
-   *   &htim4 -> TIM4 句柄地址。
-   *   0      -> 要写入 CNT 的值。
-   * 当前项目用途：让第一轮闸门计数从 0 个脉冲开始。
-   */
-  __HAL_TIM_SET_COUNTER(&htim4, 0);
-
-  /*
-   * __HAL_TIM_SET_COUNTER(&htim1, 0)
-   * 作用：把 TIM1 的 CNT 清零。
-   * 参数：
-   *   &htim1 -> TIM1 句柄地址。
-   *   0      -> CNT 初始值。
-   * 当前项目用途：让 1 秒闸门从 t=0 开始计时。
+   * TIM1：外部脉冲计数器。
+   * PA12 / TIM1_ETR 提供被测脉冲；
+   * TIM4_TRGO 通过 ITR3 控制 TIM1 的 Gated Mode。
    */
   __HAL_TIM_SET_COUNTER(&htim1, 0);
+  __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+  HAL_NVIC_ClearPendingIRQ(TIM1_UP_IRQn);
+
+  if (HAL_TIM_Base_Start_IT(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /*
-   * HAL_TIM_Base_Start_IT(&htim1)
-   * 作用：启动 TIM1 基本计数，并开启 TIM1 Update 中断。
-   * 参数：
-   *   &htim1 -> TIM1 的 HAL 句柄地址。
-   * 当前项目用途：TIM1 每计满 1 秒产生一次 Update Event，作为门控测频的时间基准。
+   * 此时 TIM1 的 CEN 已经打开，
+   * 但 TIM4 尚未启动，TRGO 仍为 LOW，
+   * 所以 TIM1 的 Gate 关闭，不会统计 PA12 输入脉冲。
    */
-  if (HAL_TIM_Base_Start_IT(&htim1) != HAL_OK)
+
+  /* TIM4：启动第一次 1 秒 One Pulse 硬件闸门。 */
+  __HAL_TIM_SET_COUNTER(&htim4, 0);
+  __HAL_TIM_CLEAR_FLAG(&htim4, TIM_FLAG_UPDATE);
+  HAL_NVIC_ClearPendingIRQ(TIM4_IRQn);
+
+  if (HAL_TIM_Base_Start_IT(&htim4) != HAL_OK)
   {
     Error_Handler();
   }
@@ -501,9 +486,9 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
  * 参数：
  *   htim -> 发生 Update Event 的定时器句柄指针。
  * 当前项目中三个来源：
- *   TIM1 -> 1 秒闸门结束。
+ *   TIM1 -> 16 位外部脉冲计数器溢出。
  *   TIM2 -> 16 位时间计数器溢出。
- *   TIM4 -> 16 位外部脉冲计数器溢出。
+ *   TIM4 -> 1 秒 One Pulse 硬件闸门结束。
  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
