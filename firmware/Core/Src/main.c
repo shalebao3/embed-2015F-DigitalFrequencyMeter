@@ -60,6 +60,12 @@ typedef enum
 #define FREQUENCY_TIMEOUT_MS 1500U
 
 /*
+ * 题目 A -> B 时间间隔上限为 100 ms。
+ * 这里给到 200 ms 超时，既覆盖题目范围，又能在 B 丢失时尽快重新等待新的 A。
+ */
+#define INTERVAL_TIMEOUT_MS 200U
+
+/*
  * 周期法 -> 闸门法切换阈值。
  * TIM2 = 72 MHz，10 kHz 周期对应 7200 tick。
  * 当 period_ticks <= 7200 时，说明输入频率已经达到约 10 kHz 或更高。
@@ -102,6 +108,8 @@ static volatile uint64_t interval_end_timestamp = 0;   // CH2：B 信号到达�
 static volatile uint64_t interval_ticks = 0;           // A → B 的 TIM2 tick 数
 static volatile uint64_t interval_ns = 0;              // A → B 时间间隔，单位 ns
 static volatile uint8_t interval_waiting_ch2 = 0;      // 1=已经收到 A，等待 B
+static volatile uint32_t interval_start_tick_ms = 0;   // A 到达时的 HAL tick，用于等待 B 超时判断
+static volatile uint8_t interval_valid = 0;            // 1=当前 interval_ticks/interval_ns 是完整 A->B 测量结果
 
 static volatile uint32_t frequency_hz = 0;             // 周期法计算得到的频率，单位 Hz
 static volatile uint64_t frequency_millihz = 0;        // mHz
@@ -190,6 +198,10 @@ static void Instrument_SetMode(InstrumentMode new_mode)
   interval_waiting_ch2 = 0;
   interval_start_timestamp = 0;
   interval_end_timestamp = 0;
+  interval_start_tick_ms = 0;
+  interval_ticks = 0;
+  interval_ns = 0;
+  interval_valid = 0;
 
   if (new_mode == INSTRUMENT_MODE_INTERVAL)
   {
@@ -209,9 +221,6 @@ static void Instrument_SetMode(InstrumentMode new_mode)
     tim1_overflow_count = 0;
     __HAL_TIM_SET_COUNTER(&htim1, 0);
     __HAL_TIM_SET_COUNTER(&htim4, 0);
-
-    interval_ticks = 0;
-    interval_ns = 0;
 
     /* A、B 两路输入捕获都需要中断。 */
     __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_CC1);
@@ -358,6 +367,32 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+    /*
+     * INTERVAL 模式等待 B 超时处理。
+     * A 已经到来但超过 200 ms 仍没有 B，则放弃本次 A，清除旧结果并重新等待新的 A。
+     */
+    if ((instrument_mode == INSTRUMENT_MODE_INTERVAL) &&
+        interval_waiting_ch2 &&
+        ((uint32_t)(HAL_GetTick() - interval_start_tick_ms) > INTERVAL_TIMEOUT_MS))
+    {
+      HAL_NVIC_DisableIRQ(TIM2_IRQn);
+
+      if ((instrument_mode == INSTRUMENT_MODE_INTERVAL) &&
+          interval_waiting_ch2 &&
+          ((uint32_t)(HAL_GetTick() - interval_start_tick_ms) > INTERVAL_TIMEOUT_MS))
+      {
+        interval_waiting_ch2 = 0;
+        interval_valid = 0;
+        interval_start_timestamp = 0;
+        interval_end_timestamp = 0;
+        interval_start_tick_ms = 0;
+        interval_ticks = 0;
+        interval_ns = 0;
+      }
+
+      HAL_NVIC_EnableIRQ(TIM2_IRQn);
+    }
 
     /*
      * FREQUENCY / PERIOD 模式都需要周期结果有效性检测。
@@ -579,7 +614,14 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
     {
       if (interval_waiting_ch2 == 0)
       {
+        /* 新的一次 A 到来后，旧的 A->B 结果立即失效。 */
+        interval_valid = 0;
+        interval_ticks = 0;
+        interval_ns = 0;
+        interval_end_timestamp = 0;
+
         interval_start_timestamp = current_timestamp;
+        interval_start_tick_ms = HAL_GetTick();
         interval_waiting_ch2 = 1;
       }
       return;
@@ -656,6 +698,22 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 
     if (interval_waiting_ch2 == 1)
     {
+      /*
+       * 即使主循环尚未来得及执行超时处理，也要在 B 到来时复查等待时间。
+       * 超过 200 ms 的 B 不能和旧 A 配对。
+       */
+      if ((uint32_t)(HAL_GetTick() - interval_start_tick_ms) > INTERVAL_TIMEOUT_MS)
+      {
+        interval_waiting_ch2 = 0;
+        interval_valid = 0;
+        interval_start_timestamp = 0;
+        interval_end_timestamp = 0;
+        interval_start_tick_ms = 0;
+        interval_ticks = 0;
+        interval_ns = 0;
+        return;
+      }
+
       interval_end_timestamp = current_timestamp;
       interval_ticks =
           interval_end_timestamp - interval_start_timestamp;
@@ -665,6 +723,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
            TIM2_COUNTER_HZ / 2ULL) /
           TIM2_COUNTER_HZ;
 
+      interval_valid = 1;
       interval_waiting_ch2 = 0;
     }
   }
