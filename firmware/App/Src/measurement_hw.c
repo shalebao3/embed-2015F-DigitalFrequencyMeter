@@ -139,14 +139,18 @@ void MeasurementHw_TIM2ConfigureTimestampCapture(uint8_t enable_ch2_interrupt)
 {
   __HAL_TIM_DISABLE(&htim2);
 
+  // DMA / 中断使能寄存器(TIMx_DIER)，UIE：允许更新中断（Update interrupt enable）0：禁止更新中断；1：允许更新中断。 
   htim2.Instance->DIER = 0U;
+  // 状态寄存器(TIMx_SR)，UIF：更新中断标志（Update interrupt flag）0：没有发生更新事件；1：发生了更新事件。
   htim2.Instance->SR = 0U;
 
-  /* 退出 DUTY 使用的 Reset Mode。 */
+  /* 退出 DUTY 使用的 Reset Mode。把 TIM2 的 SMCR 寄存器中的 SMS 和 TS 字段清零，其他位保持不变， */
   htim2.Instance->SMCR &= ~(TIM_SMCR_SMS | TIM_SMCR_TS);
 
   /* CH1=Direct TI1；CH2=Direct TI2；DIV1；Filter=0。 */
+  // CCMR1：配置为输入捕获，并选择输入信号
   htim2.Instance->CCMR1 = TIM_CCMR1_CC1S_0 | TIM_CCMR1_CC2S_0;
+  // CCER：使能捕获，并配置捕获边沿
   htim2.Instance->CCER = TIM_CCER_CC1E | TIM_CCER_CC2E;
 
   htim2.Init.Prescaler = 0U;
@@ -161,7 +165,7 @@ void MeasurementHw_TIM2ConfigureTimestampCapture(uint8_t enable_ch2_interrupt)
   htim2.Instance->DIER = TIM_IT_UPDATE | TIM_IT_CC1;
   if (enable_ch2_interrupt)
   {
-    htim2.Instance->DIER |= TIM_IT_CC2;
+    htim2.Instance->DIER |= TIM_IT_CC2;  // 置一，使能 CH2 捕获中断
   }
 
   HAL_NVIC_ClearPendingIRQ(TIM2_IRQn);
@@ -179,7 +183,7 @@ void MeasurementHw_TIM2ConfigureDutyCapture(uint16_t prescaler)
   htim2.Instance->SR = 0U;
 
   /* 同一根 TI1：CH1 Direct 捕获上升沿，CH2 Indirect 捕获下降沿。 */
-  htim2.Instance->CCMR1 = TIM_CCMR1_CC1S_0 | TIM_CCMR1_CC2S_1;
+  htim2.Instance->CCMR1 = TIM_CCMR1_CC1S_0 | TIM_CCMR1_CC2S_1;  
   htim2.Instance->CCER = TIM_CCER_CC1E | TIM_CCER_CC2E | TIM_CCER_CC2P;
 
   /* TI1FP1 上升沿触发 Reset Mode，每周期自动把 CNT 归零。 */
@@ -268,6 +272,9 @@ void MeasurementHw_TIM2SetCh1Interrupt(uint8_t enable)
   }
 }
 
+/**
+ * @brief Disable TIM2 中断
+ */
 void MeasurementHw_TIM2IrqDisable(void)
 {
   HAL_NVIC_DisableIRQ(TIM2_IRQn);

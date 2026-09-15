@@ -222,16 +222,31 @@ void FrequencyMeter_Task(void)
   }
 }
 
+/**
+ * @brief 获取频率结果。
+ * @note FREQUENCY / PERIOD 共用最终结果。
+ * @retval 频率，单位 Hz。
+ */
 uint32_t FrequencyMeter_GetFrequencyHz(void)
 {
   return measured_frequency_hz;
 }
 
+/**
+ * @brief 获取频率结果。
+ * @note FREQUENCY / PERIOD 共用最终结果。
+ * @retval 周期，单位 ns。
+ */
 uint64_t FrequencyMeter_GetPeriodNs(void)
 {
   return measured_period_ns;
 }
 
+/**
+ * @brief 获取频率结果是否有效。
+ * @note FREQUENCY / PERIOD 共用最终结果。
+ * @retval 频率结果是否有效。
+ */
 uint8_t FrequencyMeter_IsValid(void)
 {
   if (frequency_method == FREQUENCY_METHOD_PERIOD)

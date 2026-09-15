@@ -15,7 +15,7 @@ static volatile uint8_t instrument_mode_initialized = 0;
 /* 最近一次可用频率；经过 INTERVAL 再切入 DUTY 时也可用于第一次 PSC 选档。 */
 static uint32_t last_frequency_hint_hz = 0;
 
-/** @brief 判断模式是否属于 FREQUENCY / PERIOD 共享引擎。 */
+/** @brief 判断模式是否属于 FREQUENCY / PERIOD 模式中的一种。 */
 static uint8_t Instrument_IsFrequencyPeriodMode(InstrumentMode mode)
 {
   return (uint8_t)((mode == INSTRUMENT_MODE_FREQUENCY) ||
@@ -107,9 +107,9 @@ void Instrument_SetMode(InstrumentMode new_mode)
  */
 void Instrument_Task(void)
 {
-  uint32_t gate_frequency_hz;
-  uint32_t current_frequency;
-  uint8_t gate_updated = 0U;
+  uint32_t gate_frequency_hz;  //  频率结果
+  uint32_t current_frequency;  //  频率结果
+  uint8_t gate_updated = 0U;   //  Gate 是否更新
 
   if (Instrument_IsFrequencyPeriodMode(instrument_mode))
   {

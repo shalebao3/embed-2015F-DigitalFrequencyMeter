@@ -9,7 +9,7 @@
  */
 typedef enum
 {
-  INSTRUMENT_MODE_FREQUENCY = 0, // 频率模式
+  INSTRUMENT_MODE_FREQUENCY = 0, // 频率模式，默认模式
   INSTRUMENT_MODE_PERIOD,        // 周期模式
   INSTRUMENT_MODE_DUTY,          // 占空比模式
   INSTRUMENT_MODE_INTERVAL       // A -> B 时间间隔模式
