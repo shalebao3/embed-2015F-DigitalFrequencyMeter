@@ -13,7 +13,7 @@ static volatile uint32_t tim1_overflow_count = 0;
 static volatile uint8_t gate_ready = 0;
 
 /**
- * @brief 启动测量系统依赖的四个 Timer。
+ * @brief 启动测量系统依赖的 TIM1/TIM2/TIM3/TIM4。
  * @note CubeMX 的 MX_TIMx_Init() 必须已经执行。
  * @note HAL Start 只做一次；后续模式切换直接调整中断源、CEN 和相关寄存器。
  */
@@ -58,7 +58,8 @@ void MeasurementHw_Init(void)
 }
 
 /**
- * @brief 停止 TIM1 + TIM4 硬件闸门链，并清理运行状态。
+ * @brief 停止 TIM1 + TIM4 硬件 Gate 测频链，并清理本轮运行状态。
+ * @note 会清除 Gate 完成标志、TIM1 软件溢出计数，并把 TIM1/TIM4 CNT 归零。
  */
 void MeasurementHw_GateStop(void)
 {
@@ -78,7 +79,7 @@ void MeasurementHw_GateStop(void)
 
 /**
  * @brief 从干净状态启动一轮新的 1 秒 Gate。
- * @note 先准备 TIM1，再启动 TIM4 One Pulse，避免窗口起点丢脉冲。
+ * @note 先调用 MeasurementHw_GateStop() 清理旧状态，再先准备 TIM1、后启动 TIM4 One Pulse，避免窗口起点丢脉冲。
  */
 void MeasurementHw_GateStartFresh(void)
 {
@@ -89,7 +90,9 @@ void MeasurementHw_GateStartFresh(void)
 }
 
 /**
- * @brief 快照已经结束的 Gate，计算频率并立即准备下一轮。
+ * @brief 在本轮 Gate 已结束时快照 TIM1 脉冲计数、生成频率结果，并立即准备下一轮 Gate。
+ * @param frequency_hz 输出参数，用于返回本轮 1 秒 Gate 内统计到的脉冲总数，单位 Hz。
+ * @retval 1=成功取得一轮新的 Gate 结果；0=输出指针为空或 Gate 尚未结束。
  */
 uint8_t MeasurementHw_GateTakeFrequency(uint32_t *frequency_hz)
 {
@@ -133,13 +136,15 @@ uint8_t MeasurementHw_GateTakeFrequency(uint32_t *frequency_hz)
 }
 
 /**
- * @brief 配置 TIM2 为普通自由运行时间轴 + 输入捕获。
+ * @brief 把 TIM2 配置为普通自由运行时间轴 + 双路输入捕获。
+ * @param enable_ch2_interrupt 0=只使能 CH1 捕获中断；非 0=额外使能 CH2 捕获中断。
+ * @note CH1=Direct TI1，CH2=Direct TI2；该参数只控制 CH2 中断，不关闭 CH2 捕获硬件。
  */
 void MeasurementHw_TIM2ConfigureTimestampCapture(uint8_t enable_ch2_interrupt)
 {
   __HAL_TIM_DISABLE(&htim2);
 
-  // DMA / 中断使能寄存器(TIMx_DIER)，UIE：允许更新中断（Update interrupt enable）0：禁止更新中断；1：允许更新中断。 
+  // DMA / 中断使能寄存器(TIMx_DIER)，UIE：允许更新中断（Update interrupt enable）0：禁止更新中断；1：允许更新中断。
   htim2.Instance->DIER = 0U;
   // 状态寄存器(TIMx_SR)，UIF：更新中断标志（Update interrupt flag）0：没有发生更新事件；1：发生了更新事件。
   htim2.Instance->SR = 0U;
@@ -173,7 +178,10 @@ void MeasurementHw_TIM2ConfigureTimestampCapture(uint8_t enable_ch2_interrupt)
 }
 
 /**
- * @brief 配置 TIM2 为 PWM Input：CCR1=周期，CCR2=高电平时间。
+ * @brief 把 TIM2 配置为 PWM Input，供 DUTY 模式测量周期和高电平时间。
+ * @param prescaler 写入 TIM2 PSC 的预分频值。
+ * @note CH1 Direct TI1 捕获上升沿得到周期；CH2 Indirect TI1 捕获下降沿得到高电平时间。
+ * @note TI1FP1 上升沿作为 Reset Mode 触发源，每个新周期自动把 CNT 归零。
  */
 void MeasurementHw_TIM2ConfigureDutyCapture(uint16_t prescaler)
 {
@@ -203,7 +211,9 @@ void MeasurementHw_TIM2ConfigureDutyCapture(uint16_t prescaler)
 }
 
 /**
- * @brief DUTY 自动量程时应用新的 PSC。
+ * @brief DUTY 自动量程时应用新的 TIM2 PSC，并重新同步计数器。
+ * @param prescaler 新的 TIM2 预分频寄存器 PSC 值。
+ * @note 会把 CNT 清零并产生一次更新事件，使新的 PSC 生效。
  */
 void MeasurementHw_TIM2ApplyPrescaler(uint16_t prescaler)
 {
@@ -219,7 +229,10 @@ void MeasurementHw_TIM2ApplyPrescaler(uint16_t prescaler)
 }
 
 /**
- * @brief 读取捕获 CCR，并和软件溢出计数组合成 64 位时间戳。
+ * @brief 读取 TIM2 某捕获通道的 CCR，并结合软件溢出计数构造 64 位扩展时间戳。
+ * @param channel TIM_CHANNEL_1 或 TIM_CHANNEL_2。
+ * @retval 64 位扩展时间戳，单位为 TIM2 tick。
+ * @note UIF 已置位但 Update ISR 尚未执行时，会根据捕获值判断本次 Capture 是否位于溢出之后。
  */
 uint64_t MeasurementHw_TIM2ReadCapturedTimestamp(uint32_t channel)
 {
@@ -237,7 +250,10 @@ uint64_t MeasurementHw_TIM2ReadCapturedTimestamp(uint32_t channel)
 }
 
 /**
- * @brief 轮询 PWM Input 的 CCR1/CCR2，并在成功读取后清除捕获/overcapture 标志。
+ * @brief 轮询 PWM Input 的 CCR1/CCR2，并在成功读取后清除捕获与 overcapture 标志。
+ * @param period_ticks 输出完整周期 tick 数，对应 CCR1。
+ * @param high_ticks 输出高电平持续 tick 数，对应 CCR2。
+ * @retval 1=同时获得新的周期和高电平捕获；0=输出指针为空或数据尚不完整。
  */
 uint8_t MeasurementHw_TIM2ReadPwmCapture(uint32_t *period_ticks,
                                          uint32_t *high_ticks)
@@ -261,6 +277,11 @@ uint8_t MeasurementHw_TIM2ReadPwmCapture(uint32_t *period_ticks,
   return 1U;
 }
 
+/**
+ * @brief 打开或关闭 TIM2 CH1 捕获中断。
+ * @param enable 0=关闭 CC1 中断；非 0=打开 CC1 中断。
+ * @note 切换前会先关闭 CC1 中断并清除旧 CC1 标志，避免处理陈旧捕获事件。
+ */
 void MeasurementHw_TIM2SetCh1Interrupt(uint8_t enable)
 {
   __HAL_TIM_DISABLE_IT(&htim2, TIM_IT_CC1);
@@ -273,13 +294,17 @@ void MeasurementHw_TIM2SetCh1Interrupt(uint8_t enable)
 }
 
 /**
- * @brief Disable TIM2 中断
+ * @brief 在 NVIC 层暂时屏蔽 TIM2_IRQn。
+ * @note 用于保护与 TIM2 ISR 共享的软件状态，避免主循环与中断竞争。
  */
 void MeasurementHw_TIM2IrqDisable(void)
 {
   HAL_NVIC_DisableIRQ(TIM2_IRQn);
 }
 
+/**
+ * @brief 清除 TIM2_IRQn Pending 状态后重新使能 TIM2 中断。
+ */
 void MeasurementHw_TIM2IrqEnable(void)
 {
   HAL_NVIC_ClearPendingIRQ(TIM2_IRQn);
@@ -287,8 +312,10 @@ void MeasurementHw_TIM2IrqEnable(void)
 }
 
 /**
- * @brief HAL Update 回调只维护底层硬件时间轴/闸门状态。
- * @note 业务算法不放在这里：TIM1=外部计数溢出，TIM2=时间轴溢出，TIM4=Gate 完成。
+ * @brief HAL Timer Update 回调，只维护底层硬件时间轴和 Gate 状态。
+ * @param htim 产生 Update 中断的 Timer 句柄。
+ * @note TIM1 Update=外部脉冲计数溢出；TIM2 Update=时间轴溢出；TIM4 Update=本轮 Gate 完成。
+ * @note 业务算法不放在该回调中，仅维护底层计数状态。
  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
