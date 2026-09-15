@@ -15,7 +15,11 @@ static volatile uint8_t instrument_mode_initialized = 0;
 /* 最近一次可用频率；经过 INTERVAL 再切入 DUTY 时也可用于第一次 PSC 选档。 */
 static uint32_t last_frequency_hint_hz = 0;
 
-/** @brief 判断模式是否属于 FREQUENCY / PERIOD 模式中的一种。 */
+/**
+ * @brief 判断给定模式是否属于 FREQUENCY / PERIOD 共用测量引擎。
+ * @param mode 待判断的仪器功能模式。
+ * @retval 1=FREQUENCY 或 PERIOD；0=其他模式。
+ */
 static uint8_t Instrument_IsFrequencyPeriodMode(InstrumentMode mode)
 {
   return (uint8_t)((mode == INSTRUMENT_MODE_FREQUENCY) ||
@@ -23,7 +27,8 @@ static uint8_t Instrument_IsFrequencyPeriodMode(InstrumentMode mode)
 }
 
 /**
- * @brief 初始化底层 Timer 并默认进入 FREQUENCY 模式。
+ * @brief 初始化底层测量硬件，并默认进入 FREQUENCY 模式。
+ * @note 先启动共享 Timer，再暂时屏蔽 TIM2_IRQn 完成频率测量引擎初始化，最后恢复中断。
  */
 void Instrument_Init(void)
 {
@@ -41,8 +46,9 @@ void Instrument_Init(void)
 
 /**
  * @brief 统一切换仪器功能模式。
+ * @param new_mode 目标 InstrumentMode。
  * @note FREQUENCY <-> PERIOD 共享完全相同的硬件，只改变上层显示语义。
- * @note 其他切换会暂时屏蔽 TIM2_IRQn，再由目标模块负责重配硬件。
+ * @note 其他切换会暂时屏蔽 TIM2_IRQn，再由目标模块负责重配 TIM2 和 Gate 硬件。
  */
 void Instrument_SetMode(InstrumentMode new_mode)
 {
@@ -102,8 +108,8 @@ void Instrument_SetMode(InstrumentMode new_mode)
 }
 
 /**
- * @brief 仪器应用层主任务。
- * @note 各算法模块只处理自己的状态；共享的 1 秒 Gate 结果在这里按当前模式分发。
+ * @brief 仪器应用层主任务，应在 main() 的 while(1) 中持续调用。
+ * @note 根据当前功能模式执行对应算法任务，并统一读取和分发 TIM1+TIM4 的 Gate 测频结果。
  */
 void Instrument_Task(void)
 {
@@ -165,11 +171,19 @@ void Instrument_Task(void)
   }
 }
 
+/**
+ * @brief 获取当前仪器功能模式。
+ * @retval 当前 InstrumentMode 枚举值。
+ */
 InstrumentMode Instrument_GetMode(void)
 {
   return instrument_mode;
 }
 
+/**
+ * @brief 获取当前模式可提供的频率结果。
+ * @retval FREQUENCY/PERIOD 模式返回 FrequencyMeter 结果；DUTY 返回辅助频率；INTERVAL 返回 0。
+ */
 uint32_t Instrument_GetFrequencyHz(void)
 {
   if (Instrument_IsFrequencyPeriodMode(instrument_mode))
@@ -185,6 +199,10 @@ uint32_t Instrument_GetFrequencyHz(void)
   return 0U;
 }
 
+/**
+ * @brief 获取当前模式可提供的周期结果。
+ * @retval FREQUENCY/PERIOD 模式返回 FrequencyMeter 结果；DUTY 返回辅助周期；INTERVAL 返回 0，单位 ns。
+ */
 uint64_t Instrument_GetPeriodNs(void)
 {
   if (Instrument_IsFrequencyPeriodMode(instrument_mode))
@@ -200,6 +218,10 @@ uint64_t Instrument_GetPeriodNs(void)
   return 0ULL;
 }
 
+/**
+ * @brief 获取当前占空比结果。
+ * @retval DUTY 模式返回 0~1000 的占空比千分数；其他模式返回 0。
+ */
 uint16_t Instrument_GetDutyPermille(void)
 {
   return (instrument_mode == INSTRUMENT_MODE_DUTY)
@@ -207,6 +229,10 @@ uint16_t Instrument_GetDutyPermille(void)
              : 0U;
 }
 
+/**
+ * @brief 获取当前 A->B 时间间隔结果。
+ * @retval INTERVAL 模式返回时间间隔，单位 ns；其他模式返回 0。
+ */
 uint64_t Instrument_GetIntervalNs(void)
 {
   return (instrument_mode == INSTRUMENT_MODE_INTERVAL)
@@ -214,6 +240,10 @@ uint64_t Instrument_GetIntervalNs(void)
              : 0ULL;
 }
 
+/**
+ * @brief 判断当前功能模式的最终测量结果是否有效。
+ * @retval 1=当前模式存在有效结果；0=当前结果无效。
+ */
 uint8_t Instrument_IsResultValid(void)
 {
   if (Instrument_IsFrequencyPeriodMode(instrument_mode))
@@ -230,7 +260,9 @@ uint8_t Instrument_IsResultValid(void)
 }
 
 /**
- * @brief TIM2 输入捕获 HAL 回调，只负责把捕获事件路由到当前业务模块。
+ * @brief TIM2 输入捕获 HAL 回调，把捕获事件路由到当前业务模块。
+ * @param htim 产生输入捕获中断的 Timer 句柄。
+ * @note 仅处理 TIM2；DUTY 不使用 Capture ISR，而是由主循环轮询 CCR1/CCR2。
  * @note 时间戳扩展由 measurement_hw 完成，算法由 frequency/interval 模块完成。
  */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
