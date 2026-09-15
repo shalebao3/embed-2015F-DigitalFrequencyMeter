@@ -82,7 +82,7 @@ void FrequencyMeter_Start(void)
  */
 void FrequencyMeter_OnCapture(uint64_t timestamp)
 {
-  last_capture_tick_ms = HAL_GetTick();
+  last_capture_tick_ms = HAL_GetTick();  //  TIM2_CH1 最近一次捕获到输入上升沿时，当时的系统时间。
 
   if (capture_state == 0U)
   {
@@ -163,7 +163,7 @@ void FrequencyMeter_Task(void)
   /* PERIOD 方法下长时间没有新边沿，则让旧周期结果失效。 */
   if ((frequency_method == FREQUENCY_METHOD_PERIOD) &&
       frequency_valid &&
-      ((uint32_t)(HAL_GetTick() - last_capture_tick_ms) > FREQUENCY_TIMEOUT_MS))
+      ((uint32_t)(HAL_GetTick() - last_capture_tick_ms) > FREQUENCY_TIMEOUT_MS)) // HAL_GetTick：读取 STM32 从启动到现在过去了多少毫秒；防回绕写法
   {
     MeasurementHw_TIM2IrqDisable();
 
