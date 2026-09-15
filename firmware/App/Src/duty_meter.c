@@ -21,7 +21,10 @@ static volatile uint8_t duty_valid = 0;
 static volatile uint32_t measured_frequency_hz = 0;
 static volatile uint64_t measured_period_ns = 0;
 
-/** @brief 清空占空比捕获状态；硬件配置由 measurement_hw 负责。 */
+/**
+ * @brief 清空占空比捕获软件状态，不修改底层 TIM2 配置。
+ * @note PSC 发生变化或捕获超时时调用，旧占空比结果会立即失效。
+ */
 static void DutyMeter_ResetCaptureState(void)
 {
   duty_period_ticks = 0;
@@ -33,7 +36,9 @@ static void DutyMeter_ResetCaptureState(void)
 }
 
 /**
- * @brief 根据 1 秒 Gate 粗频率计算 TIM2 PSC。
+ * @brief 根据 1 秒 Gate 粗频率计算适合 PWM Input 的 TIM2 PSC。
+ * @param gate_frequency Gate 测得的粗频率，单位 Hz。
+ * @retval 推荐写入 TIM2 PSC 的 16 位预分频值。
  * @note 使用 gate_count-1 作为保守频率下界，避免低频 ±1 count 误差导致周期溢出。
  */
 static uint16_t DutyMeter_CalculatePrescaler(uint32_t gate_frequency)
@@ -66,7 +71,9 @@ static uint16_t DutyMeter_CalculatePrescaler(uint32_t gate_frequency)
 }
 
 /**
- * @brief 应用新的自动量程 PSC；时间尺度变化后旧占空比结果立即作废。
+ * @brief 应用新的自动量程 PSC。
+ * @param prescaler 目标 TIM2 PSC 值。
+ * @note 仅在 PSC 确实变化时重配硬件；时间尺度改变后旧占空比结果立即作废。
  */
 static void DutyMeter_ApplyPrescaler(uint16_t prescaler)
 {
@@ -81,7 +88,9 @@ static void DutyMeter_ApplyPrescaler(uint16_t prescaler)
 }
 
 /**
- * @brief 启动 DUTY 测量。
+ * @brief 启动 DUTY 占空比测量。
+ * @param frequency_hint_hz 切换前已知的频率提示，单位 Hz；为 0 时使用默认安全 PSC。
+ * @note 配置 TIM2 为 PWM Input，同时启动 TIM1+TIM4 Gate 作为辅助频率和自动量程依据。
  */
 void DutyMeter_Start(uint32_t frequency_hint_hz)
 {
@@ -101,7 +110,8 @@ void DutyMeter_Start(uint32_t frequency_hint_hz)
 }
 
 /**
- * @brief 轮询 PWM Input 捕获结果并计算占空比。
+ * @brief DUTY 模式主任务，轮询 PWM Input 捕获并计算占空比。
+ * @note 第一轮完整捕获仅用于同步；后续使用 CCR2/CCR1 计算占空比，并在长期无新捕获时使结果失效。
  */
 void DutyMeter_Task(void)
 {
@@ -145,6 +155,7 @@ void DutyMeter_Task(void)
 
 /**
  * @brief 接收一轮 Gate 粗频率，并据此更新辅助频率/周期和 TIM2 自动量程。
+ * @param frequency_hz 本轮 Gate 测得的频率，单位 Hz。
  */
 void DutyMeter_OnGateMeasurement(uint32_t frequency_hz)
 {
@@ -159,21 +170,37 @@ void DutyMeter_OnGateMeasurement(uint32_t frequency_hz)
   DutyMeter_ApplyPrescaler(new_prescaler);
 }
 
+/**
+ * @brief 获取最终占空比结果。
+ * @retval 占空比千分数，0~1000 对应 0.0%~100.0%。
+ */
 uint16_t DutyMeter_GetPermille(void)
 {
   return measured_duty_permille;
 }
 
+/**
+ * @brief 获取 DUTY 模式下由 Gate 提供的辅助频率结果。
+ * @retval 当前频率，单位 Hz；尚无 Gate 结果时为 0。
+ */
 uint32_t DutyMeter_GetFrequencyHz(void)
 {
   return measured_frequency_hz;
 }
 
+/**
+ * @brief 获取 DUTY 模式下由辅助频率换算得到的周期结果。
+ * @retval 当前周期，单位 ns；尚无有效辅助频率时为 0。
+ */
 uint64_t DutyMeter_GetPeriodNs(void)
 {
   return measured_period_ns;
 }
 
+/**
+ * @brief 判断当前占空比结果是否有效。
+ * @retval 1=已经获得完整且未超时的 PWM Input 结果；0=结果无效。
+ */
 uint8_t DutyMeter_IsValid(void)
 {
   return duty_valid;
