@@ -14,7 +14,10 @@ static volatile uint8_t interval_waiting_ch2 = 0;      // 1=已经有 A，等待
 static volatile uint32_t interval_start_tick_ms = 0;   // A 到达时 HAL tick
 static volatile uint8_t interval_valid = 0;            // 1=当前结果来自完整、未超时 A->B 配对
 
-/** @brief 清空 A->B 软件状态，不修改 Timer 配置。 */
+/**
+ * @brief 清空 A->B 时间间隔测量的软件状态，不修改 Timer 配置。
+ * @note 清空后重新回到等待下一次 A(CH1) 上升沿的状态。
+ */
 static void IntervalMeter_ResetState(void)
 {
   interval_start_timestamp = 0;
@@ -27,7 +30,8 @@ static void IntervalMeter_ResetState(void)
 }
 
 /**
- * @brief 启动 A->B 测量：关闭频率 Gate，TIM2 改成 CH1+CH2 双路时间戳。
+ * @brief 启动 A->B 时间间隔测量。
+ * @note 关闭 TIM1+TIM4 频率 Gate，并把 TIM2 配置为 CH1+CH2 双路时间戳捕获。
  */
 void IntervalMeter_Start(void)
 {
@@ -37,7 +41,8 @@ void IntervalMeter_Start(void)
 }
 
 /**
- * @brief A(CH1) 到达事件。
+ * @brief 处理 A(CH1) 上升沿到达事件。
+ * @param timestamp A 到达时由 measurement_hw 扩展后的 64 位 TIM2 时间戳，单位为 TIM2 tick。
  * @note 已经在等待 B 时忽略新的 A；直到 B 到来或超时才重新等待下一次 A。
  */
 void IntervalMeter_OnCaptureA(uint64_t timestamp)
@@ -59,8 +64,9 @@ void IntervalMeter_OnCaptureA(uint64_t timestamp)
 }
 
 /**
- * @brief B(CH2) 到达事件，完成 B-A 计算。
- * @note ISR 内再次检查 200 ms 超时，避免迟到的 B 和旧 A 错配。
+ * @brief 处理 B(CH2) 上升沿到达事件，并完成 B-A 时间间隔计算。
+ * @param timestamp B 到达时由 measurement_hw 扩展后的 64 位 TIM2 时间戳，单位为 TIM2 tick。
+ * @note ISR 内再次检查 200 ms 超时，避免迟到的 B 与旧 A 错配。
  */
 void IntervalMeter_OnCaptureB(uint64_t timestamp)
 {
@@ -87,7 +93,8 @@ void IntervalMeter_OnCaptureB(uint64_t timestamp)
 }
 
 /**
- * @brief 主循环处理“只有 A、长期没有 B”的超时重新同步。
+ * @brief INTERVAL 模式主循环任务，处理“已有 A、长期没有 B”的超时重新同步。
+ * @note 超时判断期间会短暂屏蔽 TIM2_IRQn，并在屏蔽后再次复查状态，避免与 B 捕获中断竞争。
  */
 void IntervalMeter_Task(void)
 {
@@ -107,11 +114,19 @@ void IntervalMeter_Task(void)
   }
 }
 
+/**
+ * @brief 获取最近一次有效的 A->B 时间间隔结果。
+ * @retval A->B 时间间隔，单位 ns；尚无有效结果时通常为 0。
+ */
 uint64_t IntervalMeter_GetNs(void)
 {
   return interval_ns;
 }
 
+/**
+ * @brief 判断当前 A->B 时间间隔结果是否有效。
+ * @retval 1=存在完整且未超时的 A->B 配对结果；0=当前结果无效。
+ */
 uint8_t IntervalMeter_IsValid(void)
 {
   return interval_valid;
