@@ -40,7 +40,10 @@ static volatile uint8_t gate_frequency_valid = 0; // 是否至少完成一轮 Ga
 static volatile uint32_t measured_frequency_hz = 0; // 最终对上层提供的 Hz
 static volatile uint64_t measured_period_ns = 0;    // 最终对上层提供的 ns
 
-/** @brief 清空频率模块软件状态，不碰硬件。 */
+/**
+ * @brief 清空频率模块全部软件状态，不修改底层 Timer 配置。
+ * @note 默认恢复为 PERIOD 周期法，等待新的 TIM2_CH1 捕获结果。
+ */
 static void FrequencyMeter_ResetState(void)
 {
   period_ticks = 0;
@@ -63,6 +66,7 @@ static void FrequencyMeter_ResetState(void)
 
 /**
  * @brief 启动 FREQUENCY / PERIOD 共用测量引擎。
+ * @note 清空软件状态，把 TIM2 配置为普通时间戳捕获，并从干净状态启动 TIM1+TIM4 Gate。
  */
 void FrequencyMeter_Start(void)
 {
@@ -72,8 +76,9 @@ void FrequencyMeter_Start(void)
 }
 
 /**
- * @brief TIM2_CH1 上升沿捕获事件；完成周期法计算。
- * @param timestamp 已经由 measurement_hw 扩展好的 64 位 TIM2 时间戳。
+ * @brief 处理 TIM2_CH1 上升沿捕获事件，并完成周期法计算。
+ * @param timestamp 已经由 measurement_hw 扩展好的 64 位 TIM2 时间戳，单位为 TIM2 tick。
+ * @note 相邻两次时间戳相减得到 period_ticks；周期过短时请求切换到 Gate 测频。
  */
 void FrequencyMeter_OnCapture(uint64_t timestamp)
 {
@@ -119,7 +124,9 @@ void FrequencyMeter_OnCapture(uint64_t timestamp)
 }
 
 /**
- * @brief 接收一轮 1 秒闸门测量结果。
+ * @brief 接收一轮 1 秒 Gate 测频结果。
+ * @param new_frequency_hz 本轮 Gate 统计得到的频率，单位 Hz。
+ * @note Gate 方法运行时更新最终频率；频率降到 7 kHz 或以下时重新启用周期法。
  */
 void FrequencyMeter_OnGateMeasurement(uint32_t new_frequency_hz)
 {
@@ -148,7 +155,8 @@ void FrequencyMeter_OnGateMeasurement(uint32_t new_frequency_hz)
 }
 
 /**
- * @brief 频率模块主任务：处理超时、策略切换和最终结果整理。
+ * @brief 频率模块主任务。
+ * @note 负责周期法超时处理、PERIOD -> GATE 软件状态切换，以及最终频率/周期结果整理。
  */
 void FrequencyMeter_Task(void)
 {
@@ -223,9 +231,8 @@ void FrequencyMeter_Task(void)
 }
 
 /**
- * @brief 获取频率结果。
- * @note FREQUENCY / PERIOD 共用最终结果。
- * @retval 频率，单位 Hz。
+ * @brief 获取 FREQUENCY / PERIOD 共用的最终频率结果。
+ * @retval 当前频率，单位 Hz。
  */
 uint32_t FrequencyMeter_GetFrequencyHz(void)
 {
@@ -233,9 +240,8 @@ uint32_t FrequencyMeter_GetFrequencyHz(void)
 }
 
 /**
- * @brief 获取频率结果。
- * @note FREQUENCY / PERIOD 共用最终结果。
- * @retval 周期，单位 ns。
+ * @brief 获取 FREQUENCY / PERIOD 共用的最终周期结果。
+ * @retval 当前周期，单位 ns。
  */
 uint64_t FrequencyMeter_GetPeriodNs(void)
 {
@@ -243,9 +249,8 @@ uint64_t FrequencyMeter_GetPeriodNs(void)
 }
 
 /**
- * @brief 获取频率结果是否有效。
- * @note FREQUENCY / PERIOD 共用最终结果。
- * @retval 频率结果是否有效。
+ * @brief 判断 FREQUENCY / PERIOD 共用的最终测量结果是否有效。
+ * @retval PERIOD 方法下有周期法或 Gate 结果时返回 1；GATE 方法下已有 Gate 结果时返回 1，否则返回 0。
  */
 uint8_t FrequencyMeter_IsValid(void)
 {
