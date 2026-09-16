@@ -15,7 +15,7 @@ static volatile uint16_t measured_duty_permille = 0; // 0~1000 对应 0.0%~100.0
 static volatile uint16_t duty_prescaler = DUTY_DEFAULT_PRESCALER;
 static volatile uint32_t last_duty_capture_tick_ms = 0;
 static volatile uint8_t duty_capture_synced = 0; // 0=等待第一轮完整同步，1=已同步
-static volatile uint8_t duty_valid = 0;
+static volatile uint8_t duty_valid = 0;  // 1=已获得完整且未超时的 PWM Input 结果，0=结果无效
 
 /* DUTY 模式中 1 秒 Gate 同时提供辅助频率 / 周期。 */
 static volatile uint32_t measured_frequency_hz = 0;

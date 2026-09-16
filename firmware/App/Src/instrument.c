@@ -9,8 +9,8 @@
 #include "measurement_hw.h"
 
 /* 当前用户功能模式。 */
-static volatile InstrumentMode instrument_mode = INSTRUMENT_MODE_FREQUENCY;
-static volatile uint8_t instrument_mode_initialized = 0;
+static volatile InstrumentMode instrument_mode = INSTRUMENT_MODE_FREQUENCY;   //  当前仪器功能模式，默认 FREQUENCY
+static volatile uint8_t instrument_mode_initialized = 0;  //  模式是否已初始化，0=未初始化，1=已初始化
 
 /* 最近一次可用频率；经过 INTERVAL 再切入 DUTY 时也可用于第一次 PSC 选档。 */
 static uint32_t last_frequency_hint_hz = 0;
@@ -23,7 +23,7 @@ static uint32_t last_frequency_hint_hz = 0;
 static uint8_t Instrument_IsFrequencyPeriodMode(InstrumentMode mode)
 {
   return (uint8_t)((mode == INSTRUMENT_MODE_FREQUENCY) ||
-                   (mode == INSTRUMENT_MODE_PERIOD));
+                   (mode == INSTRUMENT_MODE_PERIOD));  // 1=FREQUENCY/PERIOD，0=其他模式
 }
 
 /**
@@ -36,9 +36,9 @@ void Instrument_Init(void)
   instrument_mode_initialized = 0;
   last_frequency_hint_hz = 0;
 
-  MeasurementHw_Init();
+  MeasurementHw_Init();  // 启动 TIM1/TIM2/TIM3/TIM4 时钟源
 
-  MeasurementHw_TIM2IrqDisable();
+  MeasurementHw_TIM2IrqDisable();  // 临时屏蔽 TIM2_IRQn （ TIM2 中断请求 ），避免频率测量引擎初始化期间被捕获中断打断
   FrequencyMeter_Start();
   instrument_mode_initialized = 1U;
   MeasurementHw_TIM2IrqEnable();

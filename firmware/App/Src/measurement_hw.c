@@ -85,8 +85,8 @@ void MeasurementHw_GateStartFresh(void)
 {
   MeasurementHw_GateStop();
 
-  __HAL_TIM_ENABLE(&htim1);
-  __HAL_TIM_ENABLE(&htim4);
+  __HAL_TIM_ENABLE(&htim1);  // 置一，使能 TIM1，TIM1 CNT=0 后立即开始接收外部脉冲。
+  __HAL_TIM_ENABLE(&htim4);  // 置一，使能 TIM4 One Pulse，TIM4 CNT=0 后立即开始计数。
 }
 
 /**
