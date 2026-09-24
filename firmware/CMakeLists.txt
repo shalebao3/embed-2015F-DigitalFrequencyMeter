@@ -42,18 +42,24 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
-# Application modules: keep measurement algorithms out of CubeMX generated Core/Src/main.c.
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    App/Src/instrument.c
-    App/Src/frequency_meter.c
-    App/Src/duty_meter.c
-    App/Src/interval_meter.c
-    App/Src/measurement_hw.c
+# User-written modules follow the same semantic layout as embed-stm32c8t6-template.
+# CubeMX-generated Core/ and Drivers/ stay in place so the HAL project remains regeneratable.
+file(GLOB_RECURSE PROJECT_USER_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/driver/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/bsp/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/common/*.c"
 )
 
-# Add include paths
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    ${PROJECT_USER_SOURCES}
+)
+
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    App/Inc
+    src/app
+    src/driver
+    src/bsp
+    src/common
 )
 
 # Add project symbols (macros)

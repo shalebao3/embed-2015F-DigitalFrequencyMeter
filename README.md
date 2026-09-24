@@ -20,54 +20,46 @@
 
 ## 软件工程结构
 
-测量逻辑已经从 `main.c` 拆出，CubeMX 生成代码与应用层逻辑分开：
+自定义代码目录已经与 `embed-stm32c8t6-template` 的分层语义对齐。这个仓库仍然是 CubeMX + HAL 工程，因此 CubeMX 生成的 `Core/`、`Drivers/` 和 `cmake/stm32cubemx/` 保持原位，不把生成代码强行搬进模板的 `src/user`。
 
 ```text
 firmware/
-├── Core/
-│   ├── Inc/
-│   └── Src/
-│       └── main.c
-│
-├── App/
-│   ├── Inc/
-│   │   ├── instrument.h
-│   │   ├── frequency_meter.h
-│   │   ├── duty_meter.h
-│   │   ├── interval_meter.h
-│   │   └── measurement_hw.h
-│   │
-│   └── Src/
-│       ├── instrument.c
-│       ├── frequency_meter.c
-│       ├── duty_meter.c
-│       ├── interval_meter.c
-│       └── measurement_hw.c
-│
+├── Core/                    # CubeMX 生成：main、中断、GPIO/TIM 初始化
+├── Drivers/                 # STM32 HAL / CMSIS
+├── src/
+│   ├── app/                 # 仪器模式、频率/周期/占空比/时间间隔算法
+│   │   ├── instrument.*
+│   │   ├── frequency_meter.*
+│   │   ├── duty_meter.*
+│   │   └── interval_meter.*
+│   ├── driver/
+│   │   └── measurement_hw.* # TIM1~TIM4、Capture、Gate、时间戳底层驱动
+│   ├── bsp/                 # 当前暂无板级器件适配模块
+│   └── common/              # 当前暂无通用组件
 └── CMakeLists.txt
 ```
 
 ### 模块职责
 
-| 模块 | 职责 |
+| 层 / 模块 | 职责 |
 | --- | --- |
-| `main.c` | MCU / CubeMX 初始化，然后只调用 `Instrument_Init()` 和 `Instrument_Task()` |
-| `instrument.c` | 仪器应用层总指挥：模式切换、Gate 结果分发、HAL Capture 回调路由 |
-| `frequency_meter.c` | 周期法、闸门法、7~10 kHz 迟滞、频率/周期最终结果 |
-| `duty_meter.c` | TIM2 PWM Input 占空比、自动 PSC、占空比有效性 |
-| `interval_meter.c` | A→B 时间间隔、WAIT_A/WAIT_B、超时和重新同步 |
-| `measurement_hw.c` | TIM1/TIM2/TIM3/TIM4 的底层启动、寄存器重配置、扩展时间戳、Gate 快照 |
+| `Core/main.c` | MCU / CubeMX 初始化，然后只调用 `Instrument_Init()` 和 `Instrument_Task()` |
+| `src/app/instrument.c` | 仪器应用层总指挥：模式切换、Gate 结果分发、HAL Capture 回调路由 |
+| `src/app/frequency_meter.c` | 周期法、闸门法、迟滞切换、频率/周期最终结果 |
+| `src/app/duty_meter.c` | TIM2 PWM Input 占空比、自动 PSC、占空比有效性 |
+| `src/app/interval_meter.c` | A→B 时间间隔、WAIT_A/WAIT_B、超时和重新同步 |
+| `src/driver/measurement_hw.c` | TIM1/TIM2/TIM3/TIM4 的底层启动、寄存器重配置、扩展时间戳、Gate 快照 |
 
 ### 软件模块调用关系
 
 ```mermaid
 flowchart TD
-    MAIN["main.c / 系统启动"]
-    INST["instrument / 应用层总指挥"]
-    FREQ["frequency_meter / 频率与周期"]
-    DUTY["duty_meter / 占空比"]
-    INT["interval_meter / A-B时间间隔"]
-    HW["measurement_hw / Timer硬件抽象"]
+    MAIN["Core/main.c / 系统启动"]
+    INST["app/instrument / 应用层总指挥"]
+    FREQ["app/frequency_meter / 频率与周期"]
+    DUTY["app/duty_meter / 占空比"]
+    INT["app/interval_meter / A-B时间间隔"]
+    HW["driver/measurement_hw / Timer硬件驱动"]
     TIMERS["TIM1 / TIM2 / TIM3 / TIM4"]
 
     MAIN --> INST
@@ -81,7 +73,7 @@ flowchart TD
     HW --> TIMERS
 ```
 
-现在 `main.c` 的核心应用代码已经简化为：
+现在 `main.c` 仍保持：
 
 ```c
 Instrument_Init();
@@ -92,7 +84,7 @@ while (1)
 }
 ```
 
-算法状态全部封装在各自 `.c` 文件内部，外部通过函数接口访问，不再直接共享大量全局变量。
+本次重构只调整目录与构建引用，**不改变已有测频、周期、占空比、A→B 时间间隔以及自动切换算法**。
 
 ---
 
